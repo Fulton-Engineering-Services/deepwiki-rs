@@ -1,0 +1,10 @@
+{
+  "project": "deepwiki-rs",
+  "repo_path": ".",
+  "output_file": "context.md",
+  "generated_at": "2026-09-13T02:27:38.319439+00:00",
+  "section_count": 5,
+  "char_count": 9687,
+  "baseline_git_head": "be24bad96413134048644ad8f2c40e729b9e7909",
+  "language": "zh-CN"
+}
