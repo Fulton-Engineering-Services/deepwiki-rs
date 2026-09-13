@@ -126,6 +126,8 @@ impl LLMClient {
     pub async fn prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let mut react_config = ReActConfig::default();
         react_config.concurrency = self.config.llm.tool_concurrency;
+        // CLI --verbose enables verbose ReAct logging (debug builds default on)
+        react_config.verbose = react_config.verbose || self.config.verbose;
         let response = self
             .prompt_with_react(system_prompt, user_prompt, react_config)
             .await?;
@@ -140,8 +142,11 @@ impl LLMClient {
         react_config: ReActConfig,
     ) -> Result<ReActResponse> {
         let agent_builder = self.get_agent_builder();
-        let agent = agent_builder.build_agent_with_tools(system_prompt);
-        let model_name = self.config.llm.model_efficient.clone();
+        // P1-2: pick the befitting model (efficient for short prompts,
+        // powerful for long ones) instead of always using model_efficient.
+        let (model_name, _fallover_model) =
+            evaluate_befitting_model(&self.config.llm, system_prompt, user_prompt);
+        let agent = agent_builder.build_agent_with_tools(system_prompt, &model_name);
 
         let response = self
             .retry_with_backoff(|| async {
@@ -191,7 +196,10 @@ impl LLMClient {
         original_response: &ReActResponse,
     ) -> Result<ReActResponse> {
         let agent_builder = self.get_agent_builder();
-        let agent_without_tools = agent_builder.build_agent_without_tools(system_prompt);
+        let (model_name, _fallover_model) =
+            evaluate_befitting_model(&self.config.llm, system_prompt, user_prompt);
+        let agent_without_tools =
+            agent_builder.build_agent_without_tools(system_prompt, &model_name);
 
         let chat_history = original_response
             .chat_history
@@ -227,7 +235,9 @@ impl LLMClient {
         user_prompt: &str,
     ) -> Result<String> {
         let agent_builder = self.get_agent_builder();
-        let agent = agent_builder.build_agent_without_tools(system_prompt);
+        let (model_name, _fallover_model) =
+            evaluate_befitting_model(&self.config.llm, system_prompt, user_prompt);
+        let agent = agent_builder.build_agent_without_tools(system_prompt, &model_name);
 
         self.retry_with_backoff(|| async { agent.prompt(user_prompt, 1).await.map_err(|e| e.into()) })
             .await

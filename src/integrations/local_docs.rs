@@ -157,9 +157,10 @@ impl DocumentChunker {
                     total_chunks: 0,
                     section_context: current_section.clone(),
                 });
-                // Keep overlap
+                // Keep overlap (UTF-8 safe: move the cut point to a char boundary)
                 let overlap_start = current_chunk.len().saturating_sub(self.config.chunk_overlap);
-                current_chunk = current_chunk[overlap_start..].to_string();
+                current_chunk =
+                    crate::utils::slice_from_char_boundary(&current_chunk, overlap_start).to_string();
             }
         }
         
@@ -239,14 +240,39 @@ impl DocumentChunker {
     
     /// Extract object name from SQL CREATE statement
     fn extract_sql_object_name(line: &str) -> Option<String> {
-        let upper = line.to_uppercase();
-        if let Some(pos) = upper.find("CREATE TABLE") {
-            let rest = &line[pos + 12..];
+        // Case-insensitive search on the ORIGINAL line: `to_uppercase()` can
+        // change byte lengths (e.g. 'ß' -> "SS"), which would misalign any
+        // offset computed on the uppercased copy.
+        if let Some(pos) = Self::find_case_insensitive(line, "CREATE TABLE") {
+            let rest = &line[pos + "CREATE TABLE".len()..];
             return Self::extract_first_word(rest);
         }
-        if let Some(pos) = upper.find("CREATE VIEW") {
-            let rest = &line[pos + 11..];
+        if let Some(pos) = Self::find_case_insensitive(line, "CREATE VIEW") {
+            let rest = &line[pos + "CREATE VIEW".len()..];
             return Self::extract_first_word(rest);
+        }
+        None
+    }
+
+    /// Byte offset of a case-insensitive ASCII needle in `haystack`, computed
+    /// without allocating an uppercased copy (so offsets stay valid).
+    fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+        let hay = haystack.as_bytes();
+        let nee = needle.as_bytes();
+        if nee.is_empty() || hay.len() < nee.len() {
+            return None;
+        }
+        'outer: for start in 0..=(hay.len() - nee.len()) {
+            for (i, b) in nee.iter().enumerate() {
+                if !hay[start + i].eq_ignore_ascii_case(b) {
+                    continue 'outer;
+                }
+            }
+            // Only return offsets that are valid char boundaries (needle is
+            // ASCII, but the haystack may contain multi-byte characters).
+            if haystack.is_char_boundary(start) {
+                return Some(start);
+            }
         }
         None
     }
@@ -276,8 +302,10 @@ impl DocumentChunker {
                     section_context: String::new(),
                 });
                 // Keep overlap from end of previous chunk
+                // (UTF-8 safe: move the cut point to a char boundary)
                 let overlap_start = current_chunk.len().saturating_sub(self.config.chunk_overlap);
-                current_chunk = current_chunk[overlap_start..].to_string();
+                current_chunk =
+                    crate::utils::slice_from_char_boundary(&current_chunk, overlap_start).to_string();
             }
             
             if !current_chunk.is_empty() {
@@ -421,6 +449,9 @@ impl LocalDocsProcessor {
         
         // Determine if we should chunk
         let config = chunking_config.cloned().unwrap_or_default();
+        // Fail fast on invalid configs (e.g. overlap >= max_chunk_size would
+        // otherwise make the fixed-size loop spin forever and OOM).
+        config.validate()?;
         let chunker = DocumentChunker::new(config);
         
         if !chunker.needs_chunking(&raw_content) {
@@ -602,5 +633,107 @@ mod tests {
             LocalDocsProcessor::detect_file_type(Path::new("notes.txt")).unwrap(),
             DocFileType::Text
         );
+    }
+
+    /// Regression (P0-5): overlap >= max_chunk_size must be rejected by
+    /// validation instead of looping forever.
+    #[test]
+    fn test_chunking_config_rejects_bad_overlap() {
+        let bad = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 100,
+            chunk_overlap: 100,
+            ..ChunkingConfig::default()
+        };
+        assert!(bad.validate().is_err());
+
+        let worse = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 100,
+            chunk_overlap: 500,
+            ..ChunkingConfig::default()
+        };
+        assert!(worse.validate().is_err());
+
+        let good = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 100,
+            chunk_overlap: 20,
+            ..ChunkingConfig::default()
+        };
+        assert!(good.validate().is_ok());
+    }
+
+    /// Regression (P0-5): even if a bad config bypasses validation, the
+    /// fixed-size loop must terminate (hard progress guarantee).
+    #[test]
+    fn test_fixed_size_chunking_terminates_on_bad_config() {
+        let bad = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 8,
+            chunk_overlap: 16, // >= max_chunk_size
+            min_size_for_chunking: 1,
+            strategy: "fixed".to_string(),
+        };
+        let chunker = DocumentChunker::new(bad);
+        let chunks = chunker.chunk_content("aaaaaaaabbbbbbbbcccccccc", &DocFileType::Text);
+        assert!(!chunks.is_empty());
+        // Terminates and produces bounded output
+        assert!(chunks.len() < 100);
+    }
+
+    /// Regression (P0-4): multi-byte (Chinese) content must not panic when
+    /// the semantic chunker keeps an overlap from the previous chunk.
+    #[test]
+    fn test_markdown_chunking_multibyte_no_panic() {
+        let config = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 120,
+            chunk_overlap: 50, // intentionally not char-aligned
+            min_size_for_chunking: 1,
+            strategy: "semantic".to_string(),
+        };
+        let chunker = DocumentChunker::new(config);
+        // 6-byte-per-2-chars content: any byte offset lands mid-character
+        let content = format!("# 标题\n\n{}\n\n## 二级\n\n{}", "中".repeat(200), "文".repeat(200));
+        let chunks = chunker.chunk_content(&content, &DocFileType::Markdown);
+        assert!(!chunks.is_empty());
+    }
+
+    /// Regression (P0-4): paragraph chunking with multibyte overlap.
+    #[test]
+    fn test_paragraph_chunking_multibyte_no_panic() {
+        let config = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 90,
+            chunk_overlap: 37, // intentionally not char-aligned
+            min_size_for_chunking: 1,
+            strategy: "paragraph".to_string(),
+        };
+        let chunker = DocumentChunker::new(config);
+        let content = format!("{}\n\n{}\n\n{}", "甲".repeat(80), "乙".repeat(80), "丙".repeat(80));
+        let chunks = chunker.chunk_content(&content, &DocFileType::Text);
+        assert!(!chunks.is_empty());
+    }
+
+    /// Regression (P0-4): SQL object name extraction must handle content
+    /// whose `to_uppercase` representation changes byte length (e.g. 'ß').
+    #[test]
+    fn test_extract_sql_object_name_with_special_chars() {
+        assert_eq!(
+            DocumentChunker::extract_sql_object_name("CREATE TABLE users (id INT)"),
+            Some("users".to_string())
+        );
+        assert_eq!(
+            DocumentChunker::extract_sql_object_name("create table `orders` (id int)"),
+            Some("orders".to_string())
+        );
+        // 'ß' uppercases to "SS" (changing the byte length of the uppercased
+        // copy) — must not panic or misread the object name.
+        assert_eq!(
+            DocumentChunker::extract_sql_object_name("-- straße note\ncreate view v_ß as select 1"),
+            Some("v_ß".to_string())
+        );
+        assert_eq!(DocumentChunker::extract_sql_object_name("SELECT 1"), None);
     }
 }

@@ -4,7 +4,10 @@ use anyhow::Result;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, utils::file_utils::is_binary_file_path};
+use crate::{
+    config::Config,
+    utils::file_utils::{is_binary_file_path, resolve_path_within},
+};
 
 /// File reading tool
 #[derive(Debug, Clone)]
@@ -39,7 +42,22 @@ impl AgentToolFileReader {
 
     async fn read_file_content(&self, args: &FileReaderArgs) -> Result<FileReaderResult> {
         let project_root = &self.config.project_path;
-        let file_path = project_root.join(&args.file_path);
+        let file_path = match resolve_path_within(project_root, &args.file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("   ⚠️ file_reader access denied: {}", e);
+                // Returned as a normal result (not an opaque tool error) so
+                // the agent can see why and retry with a valid path.
+                return Ok(FileReaderResult {
+                    file_path: args.file_path.clone(),
+                    content: format!(
+                        "Access denied: {}. Paths must be relative to the project root and must not escape it.",
+                        e
+                    ),
+                    ..Default::default()
+                });
+            }
+        };
 
         if !file_path.exists() {
             return Ok(FileReaderResult {
@@ -149,8 +167,9 @@ impl Tool for AgentToolFileReader {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         println!("   🔧 tool called...file_reader@{:?}", args);
 
-        self.read_file_content(&args)
-            .await
-            .map_err(|_e| FileReaderToolError)
+        self.read_file_content(&args).await.map_err(|e| {
+            eprintln!("   ⚠️ file_reader rejected request: {}", e);
+            FileReaderToolError
+        })
     }
 }

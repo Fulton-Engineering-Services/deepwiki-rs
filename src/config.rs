@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -135,6 +135,27 @@ pub struct Config {
     /// Boundary analysis configuration
     #[serde(default)]
     pub boundary_analysis: BoundaryAnalysisConfig,
+
+    /// Skip the preprocessing stage (CLI --skip-preprocessing)
+    #[serde(default)]
+    pub skip_preprocessing: bool,
+
+    /// Skip the research stage (CLI --skip-research)
+    #[serde(default)]
+    pub skip_research: bool,
+
+    /// Skip final document generation / compose + output stages
+    /// (CLI --skip-documentation)
+    #[serde(default)]
+    pub skip_documentation: bool,
+
+    /// Clear the LLM cache before running (CLI --force-regenerate)
+    #[serde(default)]
+    pub force_regenerate: bool,
+
+    /// Enable verbose logging for ReAct agents (CLI --verbose)
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 /// LLM model configuration
@@ -299,6 +320,30 @@ impl Default for ChunkingConfig {
             strategy: "semantic".to_string(),
             min_size_for_chunking: 10000,
         }
+    }
+}
+
+impl ChunkingConfig {
+    /// Validate cross-field constraints.
+    ///
+    /// `chunk_overlap >= max_chunk_size` makes the fixed-size chunking loop
+    /// stop advancing (`start = end - overlap <= start`) and loop forever,
+    /// pushing identical chunks until OOM. Reject such configs up front.
+    pub fn validate(&self) -> Result<()> {
+        if self.enabled {
+            ensure!(
+                self.max_chunk_size > 0,
+                "chunking.max_chunk_size must be > 0 (got {})",
+                self.max_chunk_size
+            );
+            ensure!(
+                self.chunk_overlap < self.max_chunk_size,
+                "chunking.chunk_overlap ({}) must be smaller than chunking.max_chunk_size ({})",
+                self.chunk_overlap,
+                self.max_chunk_size
+            );
+        }
+        Ok(())
     }
 }
 
@@ -690,6 +735,11 @@ impl Default for Config {
             cache: CacheConfig::default(),
             knowledge: KnowledgeConfig::default(),
             boundary_analysis: BoundaryAnalysisConfig::default(),
+            skip_preprocessing: false,
+            skip_research: false,
+            skip_documentation: false,
+            force_regenerate: false,
+            verbose: false,
         }
     }
 }

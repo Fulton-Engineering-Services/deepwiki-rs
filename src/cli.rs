@@ -188,10 +188,10 @@ impl Args {
         if let Some(model_efficient) = self.model_efficient {
             config.llm.model_efficient = model_efficient;
         }
+        // P1-2: only override model_powerful when explicitly provided on the
+        // CLI; the value from litho.toml must survive otherwise.
         if let Some(model_powerful) = self.model_powerful {
             config.llm.model_powerful = model_powerful;
-        } else {
-            config.llm.model_powerful = config.llm.model_efficient.to_string();
         }
         if let Some(max_tokens) = self.max_tokens {
             config.llm.max_tokens = max_tokens;
@@ -233,6 +233,12 @@ impl Args {
             config.boundary_analysis.only_directories_when_files_more_than = Some(only_dirs_threshold);
         }
 
+        // Workflow stage flags
+        config.skip_preprocessing = self.skip_preprocessing;
+        config.skip_research = self.skip_research;
+        config.skip_documentation = self.skip_documentation;
+        config.force_regenerate = self.force_regenerate;
+        config.verbose = self.verbose;
 
         config
     }

@@ -99,40 +99,86 @@ impl DirectoryScorer {
         )
         .await?;
 
-        // Build path → score map from keyed response
+        // Build path → score map from keyed response.
+        // Keys are normalized (trailing '/', leading './', backslashes) so
+        // small LLM formatting differences don't silently drop scores.
         let mut score_map: HashMap<String, f64> = HashMap::new();
         for result in &response.scores {
-            let normalized_path = result.path.trim().to_string();
+            let normalized_path = Self::normalize_dir_key(&result.path);
             if !normalized_path.is_empty() {
                 score_map.insert(normalized_path, result.score.clamp(0.0, 1.0));
             }
         }
 
-        // Match directories by path, warn on missing entries
+        // Match directories by path, warn on missing entries.
+        // The prompt asks the LLM to key its response by `rel_path`, so the
+        // primary lookup key here must also be the relative path (previously
+        // an absolute-path lookup that always missed and fell back to the
+        // bare directory name — wrong scores for nested same-named dirs).
         let mut scores = HashMap::new();
         let mut missing = 0usize;
         for dir in directories {
-            let path_str = dir.path.to_string_lossy();
-            if let Some(&score) = score_map.get(path_str.as_ref()) {
+            let abs_path_str = Self::normalize_dir_key(&dir.path.to_string_lossy());
+            let rel_path_str = Self::normalize_dir_key(
+                &dir.path
+                    .strip_prefix(project_path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| dir.name.clone()),
+            );
+            let name_key = Self::normalize_dir_key(&dir.name);
+            if let Some(&score) = score_map.get(&rel_path_str) {
+                scores.insert(dir.path.clone(), score);
+            } else if let Some(&score) = score_map.get(&abs_path_str) {
+                // Tolerate an LLM that answered with the absolute path
+                scores.insert(dir.path.clone(), score);
+            } else if let Some(&score) = score_map.get(&name_key) {
+                // Last resort: bare directory name (ambiguous when nested
+                // dirs share a name, but better than dropping the score)
                 scores.insert(dir.path.clone(), score);
             } else {
-                // Fallback: try relative path
-                if let Some(&score) = score_map.get(&dir.name) {
-                    scores.insert(dir.path.clone(), score);
-                } else {
-                    missing += 1;
-                    scores.insert(dir.path.clone(), 0.0);
-                }
+                missing += 1;
+                scores.insert(dir.path.clone(), 0.0);
             }
         }
         if missing > 0 {
+            let example = directories
+                .first()
+                .map(|d| {
+                    Self::normalize_dir_key(
+                        &d.path
+                            .strip_prefix(project_path)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| d.name.clone()),
+                    )
+                })
+                .unwrap_or_else(|| "src".to_string());
             eprintln!(
-                "⚠️  Warning: {} directories had no matching LLM score (will use 0.0)",
-                missing
+                "⚠️  Warning: {} of {} directories had no matching LLM score (using 0.0). \
+                 Expected the LLM to key scores by relative paths like '{}' — \
+                 check the scoring response for path mismatches.",
+                missing,
+                directories.len(),
+                example
             );
         }
 
         Ok(scores)
+    }
+
+    /// Normalize a directory key for matching: trim whitespace, drop a
+    /// leading "./" and any trailing "/", and unify separators to '/'.
+    fn normalize_dir_key(raw: &str) -> String {
+        let mut key = raw.trim().replace('\\', "/");
+        while key.starts_with("./") {
+            key = key[2..].to_string();
+        }
+        while key.ends_with('/') && key.len() > 1 {
+            key.pop();
+        }
+        if key == "." {
+            key.clear();
+        }
+        key
     }
 
     fn build_scoring_prompt(&self, directories: &[DirectoryInfo], project_path: &PathBuf) -> String {
@@ -181,5 +227,23 @@ Output JSON with a "scores" array, each entry with "path" (use the exact rel_pat
 IMPORTANT: Output valid JSON only, no markdown fences."#,
             dir_list
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DirectoryScorer;
+
+    #[test]
+    fn test_normalize_dir_key() {
+        assert_eq!(DirectoryScorer::normalize_dir_key("src"), "src");
+        assert_eq!(DirectoryScorer::normalize_dir_key("  src/  "), "src");
+        assert_eq!(DirectoryScorer::normalize_dir_key("./src"), "src");
+        assert_eq!(DirectoryScorer::normalize_dir_key("./src/utils/"), "src/utils");
+        assert_eq!(DirectoryScorer::normalize_dir_key("src\\utils"), "src/utils");
+        assert_eq!(DirectoryScorer::normalize_dir_key("."), "");
+        assert_eq!(DirectoryScorer::normalize_dir_key(""), "");
+        // Must not mangle parent-dir prefixes (only matching keys are normalized)
+        assert_eq!(DirectoryScorer::normalize_dir_key("../foo"), "../foo");
     }
 }

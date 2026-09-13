@@ -5,12 +5,11 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
 use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::types::FileInfo;
-use crate::utils::file_utils::is_test_file;
+use crate::utils::file_utils::{is_test_file, resolve_path_within};
 
 /// File exploration tool
 #[derive(Debug, Clone)]
@@ -43,9 +42,28 @@ impl AgentToolFileExplorer {
         Self { config }
     }
 
+    /// Build a result explaining that a path was sandboxed out.
+    ///
+    /// Returned as a normal result (not an opaque tool error) so the agent
+    /// can see why and retry with a valid relative path. The requested path
+    /// itself is echoed back — it came from the agent, so nothing new leaks.
+    fn access_denied(err: &anyhow::Error) -> FileExplorerResult {
+        eprintln!("   ⚠️ file_explorer access denied: {}", err);
+        FileExplorerResult {
+            insights: vec![format!(
+                "Access denied: {}. Paths must be relative to the project root and must not escape it.",
+                err
+            )],
+            ..Default::default()
+        }
+    }
+
     async fn list_directory(&self, args: &FileExplorerArgs) -> Result<FileExplorerResult> {
         let target_path = if let Some(path) = &args.path {
-            self.config.project_path.join(path)
+            match resolve_path_within(&self.config.project_path, path) {
+                Ok(p) => p,
+                Err(e) => return Ok(Self::access_denied(&e)),
+            }
         } else {
             self.config.project_path.clone()
         };
@@ -141,7 +159,10 @@ impl AgentToolFileExplorer {
             .ok_or_else(|| anyhow::anyhow!("find_files action requires pattern parameter"))?;
 
         let search_path = if let Some(path) = &args.path {
-            self.config.project_path.join(path)
+            match resolve_path_within(&self.config.project_path, path) {
+                Ok(p) => p,
+                Err(e) => return Ok(Self::access_denied(&e)),
+            }
         } else {
             self.config.project_path.clone()
         };
@@ -203,7 +224,10 @@ impl AgentToolFileExplorer {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("get_file_info action requires path parameter"))?;
 
-        let target_path = self.config.project_path.join(file_path);
+        let target_path = match resolve_path_within(&self.config.project_path, file_path) {
+            Ok(p) => p,
+            Err(e) => return Ok(Self::access_denied(&e)),
+        };
 
         if !target_path.exists() {
             return Ok(FileExplorerResult {
@@ -523,24 +547,18 @@ impl Tool for AgentToolFileExplorer {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        println!("   🔧 tool called...file_reader@{:?}", args);
+        println!("   🔧 tool called...file_explorer@{:?}", args);
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let result = match args.action.as_str() {
+            "list_directory" => self.list_directory(&args).await,
+            "find_files" => self.find_files(&args).await,
+            "get_file_info" => self.get_file_info(&args).await,
+            _ => Err(anyhow::anyhow!("unknown action: {}", args.action)),
+        };
 
-        match args.action.as_str() {
-            "list_directory" => self
-                .list_directory(&args)
-                .await
-                .map_err(|_e| FileExplorerToolError),
-            "find_files" => self
-                .find_files(&args)
-                .await
-                .map_err(|_e| FileExplorerToolError),
-            "get_file_info" => self
-                .get_file_info(&args)
-                .await
-                .map_err(|_e| FileExplorerToolError),
-            _ => Err(FileExplorerToolError),
-        }
+        result.map_err(|e| {
+            eprintln!("   ⚠️ file_explorer rejected request: {}", e);
+            FileExplorerToolError
+        })
     }
 }
