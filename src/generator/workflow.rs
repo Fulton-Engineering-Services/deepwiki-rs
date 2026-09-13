@@ -47,6 +47,28 @@ pub async fn launch(c: &Config) -> Result<()> {
 
     let config = c.clone();
 
+    // --force-regenerate: clear the LLM response cache before running
+    if config.force_regenerate {
+        let cache_dir = &config.cache.cache_dir;
+        // Safety guard: refuse to wipe the filesystem root or a bare
+        // single-component path (e.g. `--cache-dir /` or `.`).
+        let is_safe_cache_dir =
+            !cache_dir.as_os_str().is_empty() && cache_dir.components().count() >= 2;
+        if !is_safe_cache_dir {
+            anyhow::bail!(
+                "refusing to clear suspicious cache dir '{}' via --force-regenerate",
+                cache_dir.display()
+            );
+        }
+        if cache_dir.exists() {
+            println!(
+                "=== Force regeneration: clearing LLM cache at {} ===",
+                cache_dir.display()
+            );
+            std::fs::remove_dir_all(cache_dir)?;
+        }
+    }
+
     // Check mermaid-fixer availability at startup
     if !crate::generator::outlet::MermaidFixer::is_available().await {
         anyhow::bail!("mermaid-fixer is not installed. Run 'cargo install mermaid-fixer' to install it");
@@ -80,57 +102,70 @@ pub async fn launch(c: &Config) -> Result<()> {
     }
 
     // Preprocessing stage
-    let preprocess_start = Instant::now();
-    let preprocess_agent = PreProcessAgent::new();
-    preprocess_agent.execute(context.clone()).await?;
-    let preprocess_time = preprocess_start.elapsed().as_secs_f64();
-    context
-        .store_to_memory(TimingScope::TIMING, TimingKeys::PREPROCESS, preprocess_time)
-        .await?;
-    println!(
-        "=== Preprocessing completed, results stored to Memory (Duration: {:.2}s) ===",
-        preprocess_time
-    );
+    if context.config.skip_preprocessing {
+        println!("=== Skipping preprocessing (--skip-preprocessing) ===");
+        println!("   ⚠️  Downstream stages read preprocessed insights from memory; if this is not a warm/partial run they may fail.");
+    } else {
+        let preprocess_start = Instant::now();
+        let preprocess_agent = PreProcessAgent::new();
+        preprocess_agent.execute(context.clone()).await?;
+        let preprocess_time = preprocess_start.elapsed().as_secs_f64();
+        context
+            .store_to_memory(TimingScope::TIMING, TimingKeys::PREPROCESS, preprocess_time)
+            .await?;
+        println!(
+            "=== Preprocessing completed, results stored to Memory (Duration: {:.2}s) ===",
+            preprocess_time
+        );
+    }
 
     // Execute multi-agent research stage
-    let research_start = Instant::now();
-    let research_orchestrator = ResearchOrchestrator::default();
-    research_orchestrator
-        .execute_research_pipeline(&context)
-        .await?;
-    let research_time = research_start.elapsed().as_secs_f64();
-    context
-        .store_to_memory(TimingScope::TIMING, TimingKeys::RESEARCH, research_time)
-        .await?;
-    println!("\n=== Project in-depth research completed (Duration: {:.2}s) ===", research_time);
+    if context.config.skip_research {
+        println!("=== Skipping research stage (--skip-research) ===");
+    } else {
+        let research_start = Instant::now();
+        let research_orchestrator = ResearchOrchestrator::default();
+        research_orchestrator
+            .execute_research_pipeline(&context)
+            .await?;
+        let research_time = research_start.elapsed().as_secs_f64();
+        context
+            .store_to_memory(TimingScope::TIMING, TimingKeys::RESEARCH, research_time)
+            .await?;
+        println!("\n=== Project in-depth research completed (Duration: {:.2}s) ===", research_time);
+    }
 
     // Execute document generation process
-    let compose_start = Instant::now();
-    let mut doc_tree = DocTree::new(&context.config.target_language);
-    let documentation_orchestrator = DocumentationComposer::default();
-    documentation_orchestrator
-        .execute(&context, &mut doc_tree)
-        .await?;
-    let compose_time = compose_start.elapsed().as_secs_f64();
-    context
-        .store_to_memory(TimingScope::TIMING, TimingKeys::COMPOSE, compose_time)
-        .await?;
-    println!("\n=== Document generation completed (Duration: {:.2}s) ===", compose_time);
+    if context.config.skip_documentation {
+        println!("=== Skipping document generation (--skip-documentation) ===");
+    } else {
+        let compose_start = Instant::now();
+        let mut doc_tree = DocTree::new(&context.config.target_language);
+        let documentation_orchestrator = DocumentationComposer::default();
+        documentation_orchestrator
+            .execute(&context, &mut doc_tree)
+            .await?;
+        let compose_time = compose_start.elapsed().as_secs_f64();
+        context
+            .store_to_memory(TimingScope::TIMING, TimingKeys::COMPOSE, compose_time)
+            .await?;
+        println!("\n=== Document generation completed (Duration: {:.2}s) ===", compose_time);
 
-    // Execute document storage
-    let output_start = Instant::now();
-    let outlet = DiskOutlet::new(doc_tree);
-    outlet.save(&context).await?;
+        // Execute document storage
+        let output_start = Instant::now();
+        let outlet = DiskOutlet::new(doc_tree);
+        outlet.save(&context).await?;
 
-    // Generate and save summary report
-    let summary_outlet = SummaryOutlet::new();
-    summary_outlet.save(&context).await?;
+        // Generate and save summary report
+        let summary_outlet = SummaryOutlet::new();
+        summary_outlet.save(&context).await?;
 
-    let output_time = output_start.elapsed().as_secs_f64();
-    context
-        .store_to_memory(TimingScope::TIMING, TimingKeys::OUTPUT, output_time)
-        .await?;
-    println!("\n=== Document storage completed (Duration: {:.2}s) ===", output_time);
+        let output_time = output_start.elapsed().as_secs_f64();
+        context
+            .store_to_memory(TimingScope::TIMING, TimingKeys::OUTPUT, output_time)
+            .await?;
+        println!("\n=== Document storage completed (Duration: {:.2}s) ===", output_time);
+    }
 
     // Record total execution time
     let total_time = overall_start.elapsed().as_secs_f64();

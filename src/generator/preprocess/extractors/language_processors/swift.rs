@@ -152,20 +152,27 @@ impl SwiftProcessor {
     fn extract_params_string(line: &str) -> String {
         if let Some(start) = line.find('(') {
             let mut depth = 0;
-            let mut end = start;
+            // Track whether a matching ')' was found; without it the slice
+            // below would be a reversed range (start+1 > end) and panic.
+            let mut end = None;
             for (i, ch) in line[start..].char_indices() {
                 match ch {
                     '(' => depth += 1,
                     ')' => {
                         depth -= 1;
                         if depth == 0 {
-                            end = start + i;
+                            end = Some(start + i);
                             break;
                         }
                     }
                     _ => {}
                 }
             }
+            // Unpaired '(' (e.g. multi-line Swift signatures) -> no params on this line
+            let end = match end {
+                Some(e) if e > start => e,
+                _ => return String::new(),
+            };
             return line[start + 1..end].to_string();
         }
         String::new()
@@ -677,6 +684,36 @@ mod tests {
     fn test_supported_extensions() {
         let processor = SwiftProcessor::new();
         assert_eq!(processor.supported_extensions(), vec!["swift"]);
+    }
+
+    /// Regression: a multi-line Swift function signature (unclosed '(' on the
+    /// first line) must not panic and must not lose the function itself.
+    #[test]
+    fn test_extract_params_string_multiline_signature_no_panic() {
+        // Unpaired '(' -> previously sliced line[start+1..start] and panicked
+        assert_eq!(SwiftProcessor::extract_params_string("func handle("), "");
+        assert_eq!(
+            SwiftProcessor::extract_params_string("func handle(\n    _ a: Int,\n    _ b: String\n) {"),
+            ""
+        );
+        // Paired single-line still works
+        assert_eq!(
+            SwiftProcessor::extract_params_string("func add(_ a: Int, _ b: Int) -> Int {"),
+            "_ a: Int, _ b: Int"
+        );
+    }
+
+    #[test]
+    fn test_multiline_func_signature_extracted_without_panic() {
+        let processor = SwiftProcessor::new();
+        let content = "func longSignature(\n    _ request: Request,\n    completion: @escaping () -> Void\n) {\n    doWork()\n}";
+        let interfaces = processor.extract_interfaces(content, &PathBuf::from("Multi.swift"));
+        let func = interfaces
+            .iter()
+            .find(|i| i.name == "longSignature")
+            .expect("multi-line func should still be extracted");
+        // Params live on continuation lines; nothing parseable on the first line
+        assert!(func.parameters.is_empty());
     }
 
     #[test]

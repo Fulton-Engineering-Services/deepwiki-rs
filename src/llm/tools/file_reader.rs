@@ -4,7 +4,10 @@ use anyhow::Result;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, utils::file_utils::is_binary_file_path};
+use crate::{
+    config::Config,
+    utils::file_utils::{is_binary_file_path, resolve_path_within},
+};
 
 /// File reading tool
 #[derive(Debug, Clone)]
@@ -37,41 +40,23 @@ impl AgentToolFileReader {
         Self { config }
     }
 
-    /// Resolve an agent-supplied path relative to the project root, refusing
-    /// absolute paths and `..` traversal that would escape the root.
-    fn resolve_within_root(&self, file_path: &str) -> Option<std::path::PathBuf> {
-        let p = std::path::Path::new(file_path);
-        if p.is_absolute() {
-            return None;
-        }
-        let candidate = self.config.project_path.join(p);
-        // Walk the candidate, collapsing ".." components, and verify it stays
-        // inside the project root.
-        let mut normalized = std::path::PathBuf::new();
-        for comp in candidate.components() {
-            match comp {
-                std::path::Component::ParentDir => {
-                    if !normalized.pop() {
-                        return None;
-                    }
-                }
-                std::path::Component::CurDir => {}
-                other => normalized.push(other.as_os_str()),
-            }
-        }
-        if normalized.starts_with(&self.config.project_path) {
-            Some(normalized)
-        } else {
-            None
-        }
-    }
-
     async fn read_file_content(&self, args: &FileReaderArgs) -> Result<FileReaderResult> {
-        let Some(file_path) = self.resolve_within_root(&args.file_path) else {
-            return Ok(FileReaderResult {
-                file_path: args.file_path.clone(),
-                ..Default::default()
-            });
+        let project_root = &self.config.project_path;
+        let file_path = match resolve_path_within(project_root, &args.file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("   ⚠️ file_reader access denied: {}", e);
+                // Returned as a normal result (not an opaque tool error) so
+                // the agent can see why and retry with a valid path.
+                return Ok(FileReaderResult {
+                    file_path: args.file_path.clone(),
+                    content: format!(
+                        "Access denied: {}. Paths must be relative to the project root and must not escape it.",
+                        e
+                    ),
+                    ..Default::default()
+                });
+            }
         };
 
         if !file_path.exists() {
@@ -110,7 +95,7 @@ impl AgentToolFileReader {
                 let selected_lines = &lines[..max_lines.min(lines.len())];
                 (selected_lines.join("\n"), selected_lines.len())
             } else {
-                // Check if file is too large, limit read lines
+                // If file is too large, limit read lines
                 let max_default_lines = 200;
                 if lines.len() > max_default_lines {
                     let selected_lines = &lines[..max_default_lines];
@@ -182,8 +167,9 @@ impl Tool for AgentToolFileReader {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         println!("   🔧 tool called...file_reader@{:?}", args);
 
-        self.read_file_content(&args)
-            .await
-            .map_err(|_e| FileReaderToolError)
+        self.read_file_content(&args).await.map_err(|e| {
+            eprintln!("   ⚠️ file_reader rejected request: {}", e);
+            FileReaderToolError
+        })
     }
 }

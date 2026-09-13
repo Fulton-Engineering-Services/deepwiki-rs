@@ -1,4 +1,49 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+
+/// Resolve an LLM-provided relative path inside a sandbox root.
+///
+/// The tool arguments (file paths) are decided by the LLM, whose context is
+/// the analyzed repository's source — a malicious repo can inject a prompt
+/// instructing the agent to read arbitrary files (e.g. `~/.ssh/id_rsa`) and
+/// send them to the remote provider. This helper guarantees the resolved
+/// path cannot escape `root`:
+/// - absolute paths are rejected;
+/// - `..` components are rejected;
+/// - symlinks are resolved (`canonicalize`) and must stay under `root`.
+pub fn resolve_path_within(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        anyhow::bail!("absolute paths are not allowed: {}", rel);
+    }
+    if rel_path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        anyhow::bail!("path traversal ('..') is not allowed: {}", rel);
+    }
+
+    let joined = root.join(rel_path);
+
+    // If the target exists, verify via symlink-resolved path that it stays
+    // inside the root. NOTE: we validate the canonical path but return the
+    // *lexical* join, so callers keep the same path shape as before
+    // (relative when `root` is relative) — returning a canonical absolute
+    // path would leak local paths into docs and into the LLM context.
+    if let Ok(canon) = joined.canonicalize() {
+        let root_canon = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf());
+        if !canon.starts_with(&root_canon) {
+            anyhow::bail!(
+                "path escapes project root: {} (resolved to {})",
+                rel,
+                canon.display()
+            );
+        }
+    }
+
+    Ok(joined)
+}
 
 /// Check if a file is a test file
 pub fn is_test_file(path: &Path) -> bool {
@@ -159,5 +204,57 @@ pub fn is_binary_file_path(path: &Path) -> bool {
         )
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_path_within_allows_normal_relative_paths() {
+        let root = Path::new("/tmp/nonexistent-root");
+        let resolved = resolve_path_within(root, "src/main.rs").unwrap();
+        assert_eq!(resolved, Path::new("/tmp/nonexistent-root/src/main.rs"));
+    }
+
+    #[test]
+    fn test_resolve_path_within_rejects_absolute_paths() {
+        let root = Path::new("/tmp/root");
+        assert!(resolve_path_within(root, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_within_rejects_parent_traversal() {
+        let root = Path::new("/tmp/root");
+        assert!(resolve_path_within(root, "../../etc/passwd").is_err());
+        assert!(resolve_path_within(root, "src/../../../.ssh/id_rsa").is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_within_rejects_symlink_escape() {
+        let dir = std::env::temp_dir().join("litho_sandbox_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        std::fs::write(dir.join("project/secret.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("project/secret.txt"), dir.join("project/link.txt"))
+            .unwrap();
+
+        let root = dir.join("project");
+        // Normal file inside root resolves fine
+        assert!(resolve_path_within(&root, "secret.txt").is_ok());
+        // Root-internal symlink is allowed
+        #[cfg(unix)]
+        assert!(resolve_path_within(&root, "link.txt").is_ok());
+
+        // Symlink pointing outside root must be rejected
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", root.join("etc-link")).unwrap();
+            assert!(resolve_path_within(&root, "etc-link/passwd").is_err());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -126,6 +126,9 @@ impl ProviderClient {
                     base_url: config.api_base_url.clone(),
                     model: model.to_string(),
                     api_key: config.api_key.clone(),
+                    system_prompt: system_prompt.to_string(),
+                    max_tokens: config.max_tokens,
+                    temperature: config.temperature,
                 }
             }
             ProviderClient::Moonshot(client) => {
@@ -256,6 +259,9 @@ impl ProviderClient {
                     base_url: config.api_base_url.clone(),
                     model: model.to_string(),
                     api_key: config.api_key.clone(),
+                    system_prompt: system_prompt.to_string(),
+                    max_tokens: config.max_tokens,
+                    temperature: config.temperature,
                 }
             }
             ProviderClient::Moonshot(client) => {
@@ -511,6 +517,11 @@ pub enum ProviderAgent {
         base_url: String,
         model: String,
         api_key: String,
+        /// Kept so the raw HTTP fallback path can replay the same preamble
+        /// (the rig agent itself cannot expose its configured preamble).
+        system_prompt: String,
+        max_tokens: u32,
+        temperature: Option<f64>,
     },
     Mistral(Agent<rig::providers::mistral::CompletionModel>),
     OpenRouter(Agent<rig::providers::openrouter::CompletionModel>),
@@ -526,7 +537,7 @@ impl ProviderAgent {
     pub async fn prompt(&self, prompt: &str, concurrency: usize) -> Result<String> {
         let concurrency = concurrency.max(1);
         match self {
-            ProviderAgent::OpenAI { agent, base_url, model, api_key } => {
+            ProviderAgent::OpenAI { agent, base_url, model, api_key, system_prompt, max_tokens, temperature } => {
                 // Try rig agent first with concurrency
                 match agent.prompt(prompt).with_tool_concurrency(concurrency).await {
                     Ok(result) => Ok(result),
@@ -538,7 +549,16 @@ impl ProviderAgent {
                             || error_msg.contains("JsonError")
                         {
                             // Fallback to direct HTTP call
-                            Self::prompt_via_http(base_url, model, api_key, prompt).await
+                            Self::prompt_via_http(
+                                base_url,
+                                model,
+                                api_key,
+                                system_prompt,
+                                *max_tokens,
+                                *temperature,
+                                prompt,
+                            )
+                            .await
                         } else {
                             Err(e.into())
                         }
@@ -570,20 +590,43 @@ impl ProviderAgent {
     }
 
     /// Direct HTTP call to OpenAI-compatible API
-    async fn prompt_via_http(base_url: &str, model: &str, api_key: &str, prompt: &str) -> Result<String> {
+    ///
+    /// Mirrors the rig agent configuration: the system prompt is sent as the
+    /// `system` message and max_tokens / temperature come from config instead
+    /// of hardcoded values (previously 4096 / 0.7, which silently truncated
+    /// long documents and dropped the agent's role/output-format preamble).
+    #[allow(clippy::too_many_arguments)]
+    async fn prompt_via_http(
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        system_prompt: &str,
+        max_tokens: u32,
+        temperature: Option<f64>,
+        prompt: &str,
+    ) -> Result<String> {
         let client = reqwest::Client::new();
 
-        let request_body = serde_json::json!({
+        let mut messages = Vec::new();
+        if !system_prompt.is_empty() {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": system_prompt
+            }));
+        }
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": prompt
+        }));
+
+        let mut request_body = serde_json::json!({
             "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "temperature": 0.7,
-            "max_tokens": 4096
+            "messages": messages,
+            "max_tokens": max_tokens
         });
+        if let Some(temp) = temperature {
+            request_body["temperature"] = serde_json::json!(temp);
+        }
 
         let response = client
             .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))

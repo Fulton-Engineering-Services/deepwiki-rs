@@ -19,7 +19,7 @@ impl<'a> AgentBuilder<'a> {
     }
 
     /// Build Agent with built-in preset tools
-    pub fn build_agent_with_tools(&self, system_prompt: &str) -> ProviderAgent {
+    pub fn build_agent_with_tools(&self, system_prompt: &str, model: &str) -> ProviderAgent {
         let llm_config = &self.config.llm;
 
         if !llm_config.disable_preset_tools {
@@ -32,22 +32,20 @@ impl<'a> AgentBuilder<'a> {
             );
 
             self.client.create_agent_with_tools(
-                &llm_config.model_efficient,
+                model,
                 &system_prompt_with_tools,
                 llm_config,
                 &file_explorer,
                 &file_reader,
             )
         } else {
-            self.client
-                .create_agent(&llm_config.model_efficient, system_prompt, llm_config)
+            self.client.create_agent(model, system_prompt, llm_config)
         }
     }
 
     /// Build Agent without tools
-    pub fn build_agent_without_tools(&self, system_prompt: &str) -> ProviderAgent {
+    pub fn build_agent_without_tools(&self, system_prompt: &str, model: &str) -> ProviderAgent {
         let llm_config = &self.config.llm;
-        self.client
-            .create_agent(&llm_config.model_efficient, system_prompt, llm_config)
+        self.client.create_agent(model, system_prompt, llm_config)
     }
 }

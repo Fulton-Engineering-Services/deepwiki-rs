@@ -267,12 +267,12 @@ impl DataFormatter {
     pub fn format_readme_content(&self, readme: &str) -> String {
         let content = if let Some(limit) = self.config.readme_truncate_length {
             if readme.len() > limit {
-                // Truncate at char boundary to avoid panicking on multibyte UTF-8
-                let mut end = limit;
-                while end > 0 && !readme.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...(truncated)", &readme[..end])
+                // Byte-slicing a multi-byte (e.g. Chinese) README would panic;
+                // cut at the nearest char boundary instead.
+                format!(
+                    "{}...(truncated)",
+                    crate::utils::truncate_at_char_boundary(readme, limit)
+                )
             } else {
                 readme.to_string()
             }
