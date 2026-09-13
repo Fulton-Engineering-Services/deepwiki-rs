@@ -331,35 +331,62 @@ impl DocumentChunker {
         chunks
     }
     
-    /// Fixed-size chunking with overlap
+    /// Fixed-size chunking with overlap.
+    ///
+    /// Termination is guaranteed *structurally*: `start` advances by a
+    /// constant `step >= 1` and the loop stops as soon as the tail is
+    /// consumed. The previous formulation
+    /// (`start = end - overlap; if start >= end { break }`) did **not**
+    /// guarantee progress: as soon as `end` was clamped to `chars.len()`
+    /// (i.e. on the final, partial block) `start` became `len - overlap`,
+    /// which is strictly less than `len` and equal to the previous `start`,
+    /// so the guard `start >= end` never fired and the loop pushed chunks
+    /// forever until the process ran out of memory. It terminated only when
+    /// `chunk_overlap == 0`.
     fn chunk_fixed_size(&self, content: &str) -> Vec<DocumentChunk> {
-        let mut chunks = Vec::new();
         let chars: Vec<char> = content.chars().collect();
-        let mut start = 0;
-        
+        // Guard against `max_chunk_size == 0` (a zero-width step would also
+        // fail to advance).
+        let max_chunk_size = self.config.max_chunk_size.max(1);
+        // An `overlap >= max_chunk_size` config cannot produce a meaningful
+        // step. `ChunkingConfig::validate` rejects it for the normal
+        // pipeline, but `DocumentChunker::new` is also constructed directly,
+        // so fall back to no overlap instead of degenerating into
+        // one-character steps.
+        let overlap = if self.config.chunk_overlap >= max_chunk_size {
+            0
+        } else {
+            self.config.chunk_overlap
+        };
+        let step = max_chunk_size - overlap; // >= 1
+
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+
         while start < chars.len() {
-            let end = (start + self.config.max_chunk_size).min(chars.len());
+            let end = (start + max_chunk_size).min(chars.len());
             let chunk_content: String = chars[start..end].iter().collect();
-            
+
             chunks.push(DocumentChunk {
                 content: chunk_content,
                 chunk_index: chunks.len(),
                 total_chunks: 0,
                 section_context: format!("Part {}", chunks.len() + 1),
             });
-            
-            // Move start, accounting for overlap
-            start = end.saturating_sub(self.config.chunk_overlap);
-            if start >= end {
+
+            // Tail consumed: nothing left to emit.
+            if end == chars.len() {
                 break;
             }
+            // Advance by a constant, strictly positive amount.
+            start += step;
         }
-        
+
         let total = chunks.len();
         for chunk in &mut chunks {
             chunk.total_chunks = total;
         }
-        
+
         chunks
     }
 }
@@ -633,6 +660,104 @@ mod tests {
             LocalDocsProcessor::detect_file_type(Path::new("notes.txt")).unwrap(),
             DocFileType::Text
         );
+    }
+
+    /// Regression (P0-OOM): the fixed-size loop must always advance.
+    ///
+    /// With a *valid* config the old guard still froze `start` on the final
+    /// partial block (`start = len - overlap`, unchanged), so the loop pushed
+    /// chunks until the process was killed by the OOM killer — for every
+    /// non-empty input, since the last block is always clamped.
+    #[test]
+    fn test_fixed_size_chunking_terminates_with_valid_config() {
+        let config = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 8,
+            chunk_overlap: 2, // valid, but the tail still gets clamped
+            min_size_for_chunking: 1,
+            strategy: "fixed".to_string(),
+        };
+        let chunker = DocumentChunker::new(config);
+        let chunks = chunker.chunk_content("aaaaaaaabbbbbbbbcccccccc", &DocFileType::Text);
+        // 24 chars, step = 8 - 2 = 6 -> starts 0, 6, 12, 18 -> 4 chunks
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].content, "aaaaaaaa");
+        assert_eq!(chunks[1].content, "aabbbbbb");
+        assert!(chunks.iter().all(|c| c.total_chunks == 4));
+
+        // Content shorter than max_chunk_size must also terminate
+        let short = chunker.chunk_content("hello", &DocFileType::Text);
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].content, "hello");
+    }
+
+    /// Regression (P0-OOM): multi-byte content (char-indexed slicing) must
+    /// terminate too — the old code hung here as well.
+    #[test]
+    fn test_fixed_size_chunking_multibyte_terminates() {
+        let config = ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 4,
+            chunk_overlap: 1,
+            min_size_for_chunking: 1,
+            strategy: "fixed".to_string(),
+        };
+        let chunker = DocumentChunker::new(config);
+        let content = "中文内容测试用例集合";
+        let chunks = chunker.chunk_content(content, &DocFileType::Text);
+        // step = 3 -> starts 0,3,6 -> last chunk consumes the tail
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[2].content, "用例集合");
+        assert!(chunks.iter().all(|c| c.total_chunks == 3));
+    }
+
+    /// Regression (P0-OOM): `chunk_overlap == 0` and `max_chunk_size == 1`
+    /// are the degenerate edges of the same loop.
+    #[test]
+    fn test_fixed_size_chunking_edge_configs_terminate() {
+        let no_overlap = DocumentChunker::new(ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 4,
+            chunk_overlap: 0,
+            min_size_for_chunking: 1,
+            strategy: "fixed".to_string(),
+        });
+        let chunks = no_overlap.chunk_content("abcdefgh", &DocFileType::Text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].content, "abcd");
+
+        let width_one = DocumentChunker::new(ChunkingConfig {
+            enabled: true,
+            max_chunk_size: 1,
+            chunk_overlap: 5, // invalid, falls back to zero overlap
+            min_size_for_chunking: 1,
+            strategy: "fixed".to_string(),
+        });
+        let chunks = width_one.chunk_content("abc", &DocFileType::Text);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[2].content, "c");
+    }
+
+    /// Regression (P0-OOM): the real production path — default config
+    /// (`semantic` strategy falls back to fixed-size for plain-text docs) with
+    /// a document long enough to be chunked. This used to hang forever and
+    /// grow the heap until the process was killed.
+    #[test]
+    fn test_default_config_plain_text_document_chunks_and_terminates() {
+        let config = ChunkingConfig::default(); // max=8000, overlap=200, semantic
+        let chunker = DocumentChunker::new(config);
+        let content = "x".repeat(16_000);
+
+        let chunks = chunker.chunk_content(&content, &DocFileType::Text);
+
+        // step = 8000 - 200 = 7800 -> starts 0, 7800, 15600
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].content.len(), 8000);
+        assert_eq!(chunks[1].content.len(), 8000);
+        assert_eq!(chunks[2].content.len(), 400); // tail
+        assert!(chunks.iter().all(|c| c.total_chunks == 3));
+        // No chunk may be empty and the loop must not emit duplicates forever
+        assert!(chunks.iter().all(|c| !c.content.is_empty()));
     }
 
     /// Regression (P0-5): overlap >= max_chunk_size must be rejected by

@@ -686,15 +686,21 @@ mod tests {
         assert_eq!(processor.supported_extensions(), vec!["swift"]);
     }
 
-    /// Regression: a multi-line Swift function signature (unclosed '(' on the
-    /// first line) must not panic and must not lose the function itself.
+    /// Regression: a Swift function signature with an unclosed '(' must not
+    /// panic (previously sliced `line[start+1..start]`).
     #[test]
     fn test_extract_params_string_multiline_signature_no_panic() {
-        // Unpaired '(' -> previously sliced line[start+1..start] and panicked
+        // Unpaired '(' -> no params, no panic
         assert_eq!(SwiftProcessor::extract_params_string("func handle("), "");
+        // Multi-line text handed in as a single string: the parens are still
+        // balanced, so the whole parenthesized payload is returned (line-based
+        // callers split on '\n' and never hit this). The point of this case is
+        // that it must not panic.
         assert_eq!(
-            SwiftProcessor::extract_params_string("func handle(\n    _ a: Int,\n    _ b: String\n) {"),
-            ""
+            SwiftProcessor::extract_params_string(
+                "func handle(\n    _ a: Int,\n    _ b: String\n) {"
+            ),
+            "\n    _ a: Int,\n    _ b: String\n"
         );
         // Paired single-line still works
         assert_eq!(

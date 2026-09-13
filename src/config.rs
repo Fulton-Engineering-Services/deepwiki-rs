@@ -326,9 +326,11 @@ impl Default for ChunkingConfig {
 impl ChunkingConfig {
     /// Validate cross-field constraints.
     ///
-    /// `chunk_overlap >= max_chunk_size` makes the fixed-size chunking loop
-    /// stop advancing (`start = end - overlap <= start`) and loop forever,
-    /// pushing identical chunks until OOM. Reject such configs up front.
+    /// `chunk_overlap >= max_chunk_size` cannot yield a valid step between
+    /// chunks, so reject it up front and fail fast with a clear message.
+    /// Note this is a config-sanity check only: `DocumentChunker::chunk_fixed_size`
+    /// guarantees progress on its own, so an invalid config can no longer
+    /// wedge the chunking loop.
     pub fn validate(&self) -> Result<()> {
         if self.enabled {
             ensure!(
