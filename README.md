@@ -20,7 +20,26 @@
   <img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/sopaco/deepwiki-rs/rust.yml">
 </p>
 
+<div align="center">
+  <a href="https://trendshift.io/repositories/67975?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-67975" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/67975" alt="sopaco%2Fdeepwiki-rs | Trendshift" width="250" height="55"/></a>
+</div>
+
 <hr />
+
+<div align="center">
+
+**🚀 Litho has evolved into [Terrain](https://github.com/sopaco/terrain)** — give your AI agents a living map of your codebase.
+
+<p align="center">
+  <a href="https://github.com/sopaco/terrain"><img width="360" alt="Terrain — agent environment managements" src="./assets/snapshot_terrain_agent_environmen_ managements.webp"></a>
+  <a href="https://github.com/sopaco/terrain"><img width="360" alt="Terrain — engineering knowledge assets" src="./assets/snapshot_terrain_engineering_knowledge_assets.webp"></a>
+</p>
+
+<sub>On top of Litho: knowledge base stays in sync with code · broader language & framework support · mainstream agents (Claude Code, Codex, DeepSeek Harness…) read it via ACP · Litho Book built in.</sub>
+
+**[Check out Terrain →](https://github.com/sopaco/terrain)** &nbsp;·&nbsp; *Litho stays the fast, focused C4 doc generator.*
+
+</div>
 
 # 👋 What's Litho
 
@@ -636,3 +655,52 @@ We welcome all forms of contributions! Report bugs or submit feature requests th
 An experienced internet veteran, having navigated through the waves of PC internet, mobile internet, and AI applications. Starting from an individual mobile application developer to a professional in the corporate world, I possess rich experience in product design and research and development. Currently, I am employed at [Kuaishou](https://en.wikipedia.org/wiki/Kuaishou), focusing on the R&D of universal front-end systems and AI exploration.
 
 GitHub: [sopaco](https://github.com/sopaco)
+
+
+## FAQ
+
+### What is Litho (deepwiki-rs)?
+
+Litho is an AI-powered documentation generation engine built with Rust. It automatically analyzes your source code and generates comprehensive, professional architecture documentation in the C4 model format.
+
+### What programming languages does Litho support?
+
+Litho supports multiple programming languages including Rust, Python, Java, Go, C#, JavaScript, and more.
+
+### What is C4 model?
+
+C4 model is a software architecture documentation approach with four levels:
+- Context diagram (system context)
+- Container diagram (system containers)
+- Component diagram (container components)
+- Code diagram (component implementation)
+
+### How do I install Litho?
+
+```bash
+cargo install deepwiki-rs
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/sopaco/deepwiki-rs
+cargo build --release
+```
+
+### Can Litho integrate with CI/CD?
+
+Yes, Litho can integrate with CI/CD pipelines to automatically generate documentation on every commit.
+
+### Why use Litho instead of manual documentation?
+
+- Automatically keeps documentation in sync with codebase
+- Saves hundreds of hours on manual maintenance
+- Professional C4 model structure
+- Consistent formatting and styling
+- Easy to navigate and understand
+
+### Where can I get help?
+
+- Documentation: https://github.com/sopaco/deepwiki-rs/tree/main/docs
+- GitHub Issues: https://github.com/sopaco/deepwiki-rs/issues
