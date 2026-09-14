@@ -21,6 +21,7 @@
 </p>
 
 <div align="center">
+  <a href="https://trendshift.io/repositories/67975?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-67975" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/67975/daily?language=Rust" alt="sopaco%2Fdeepwiki-rs | Trendshift" width="250" height="55"/></a>
   <a href="https://trendshift.io/repositories/67975?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-67975" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/67975" alt="sopaco%2Fdeepwiki-rs | Trendshift" width="250" height="55"/></a>
 </div>
 
