@@ -130,6 +130,12 @@ impl Generator<PreprocessingResult> for PreProcessAgent {
 /// Generate directory dossiers by reading files directly from disk.
 /// Each directory's files are batched: if total content exceeds 256KB, split into
 /// batches (sorted lexicographically for cache-friendly ordering) and merge results.
+///
+/// Disk reads and batch preparation run sequentially (cheap I/O), then the LLM
+/// summarization calls run concurrently, bounded by `llm.max_parallels` via
+/// `do_parallel_with_limit` - the same mechanism used by the key-modules
+/// insight analyses. Result order matches directory order (join_all preserves
+/// submission order), so downstream consumers are unaffected.
 const MAX_BATCH_SIZE: usize = 256 * 1024;
 
 async fn generate_directory_dossiers(
@@ -137,12 +143,22 @@ async fn generate_directory_dossiers(
     project_structure: &ProjectStructure,
 ) -> Result<Vec<DirectoryDossier>> {
     use crate::generator::preprocess::agents::directory_summary::DirectorySummarizer;
+    use crate::utils::threads::do_parallel_with_limit;
 
-    let summarizer = DirectorySummarizer::new();
     let config = &context.config;
-    let mut dossiers = Vec::new();
     let total_dirs = project_structure.directories.len();
+    let max_parallels = config.llm.max_parallels;
 
+    // Work item: a directory plus its pre-split file content batches.
+    struct WorkItem {
+        idx: usize,
+        dir: crate::types::DirectoryInfo,
+        batches: Vec<Vec<FileContent>>,
+    }
+
+    // Phase 1 (sequential, disk I/O only): read each directory's files and
+    // pre-split into batches. Directories with no readable files are skipped.
+    let mut work_items = Vec::new();
     for (idx, dir) in project_structure.directories.iter().enumerate() {
         // Read all files in this directory from disk
         let mut files = read_directory_files(&dir.path, config)?;
@@ -154,56 +170,63 @@ async fn generate_directory_dossiers(
         // Sort lexicographically for cache-friendly batching
         files.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Calculate total size
+        // Calculate total size and split into batches (single batch when small
+        // enough, including the edge case of one file exceeding MAX_BATCH_SIZE)
         let total_size: usize = files.iter().map(|f| f.content.len()).sum();
-
-        if total_size <= MAX_BATCH_SIZE {
-            // Single batch
-            match summarizer
-                .summarize_directory(context, dir, &files, Some((idx + 1, total_dirs)))
-                .await
-            {
-                Ok(dossier) => dossiers.push(dossier),
-                Err(e) => {
-                    eprintln!(
-                        "⚠️  Failed to summarize directory {}: {}, using fallback",
-                        dir.name, e
-                    );
-                    dossiers.push(fallback_dossier(dir));
-                }
-            }
+        let batches = if total_size <= MAX_BATCH_SIZE {
+            vec![files]
         } else {
-            // Multiple batches: split by file boundaries, keep lexicographic order within each batch
-            let batches = split_into_batches(&files, MAX_BATCH_SIZE);
-            if batches.len() == 1 {
-                // Edge case: single file exceeds 256KB
-                match summarizer
-                    .summarize_directory(context, dir, &files, Some((idx + 1, total_dirs)))
-                    .await
-                {
-                    Ok(dossier) => dossiers.push(dossier),
-                    Err(e) => {
-                        eprintln!(
-                            "⚠️  Failed to summarize directory {}: {}, using fallback",
-                            dir.name, e
-                        );
-                        dossiers.push(fallback_dossier(dir));
-                    }
-                }
-            } else {
-                match summarizer
-                    .summarize_batch(context, dir, &batches, Some((idx + 1, total_dirs)))
-                    .await
-                {
-                    Ok(dossier) => dossiers.push(dossier),
-                    Err(e) => {
-                        eprintln!(
-                            "⚠️  Failed to summarize directory {} (batch mode): {}, using fallback",
-                            dir.name, e
-                        );
-                        dossiers.push(fallback_dossier(dir));
-                    }
-                }
+            split_into_batches(&files, MAX_BATCH_SIZE)
+        };
+
+        work_items.push(WorkItem {
+            idx,
+            dir: dir.clone(),
+            batches,
+        });
+    }
+
+    // Phase 2 (parallel, bounded by llm.max_parallels): summarize directories.
+    println!(
+        "🚀 Generating directory dossiers concurrently, max parallelism: {}",
+        max_parallels
+    );
+    let summarizer_futures: Vec<_> = work_items
+        .into_iter()
+        .map(|item| {
+            let context_clone = context.clone();
+            Box::pin(async move {
+                let summarizer = DirectorySummarizer::new();
+                let progress = Some((item.idx + 1, total_dirs));
+                let result = if item.batches.len() == 1 {
+                    let files = item.batches.into_iter().next().unwrap_or_default();
+                    summarizer
+                        .summarize_directory(&context_clone, &item.dir, &files, progress)
+                        .await
+                } else {
+                    summarizer
+                        .summarize_batch(&context_clone, &item.dir, &item.batches, progress)
+                        .await
+                };
+                (item.dir, result)
+            })
+        })
+        .collect();
+
+    let results = do_parallel_with_limit(summarizer_futures, max_parallels).await;
+
+    // Phase 3 (sequential): collect in directory order, falling back
+    // per-directory on error.
+    let mut dossiers = Vec::new();
+    for (dir, result) in results {
+        match result {
+            Ok(dossier) => dossiers.push(dossier),
+            Err(e) => {
+                eprintln!(
+                    "⚠️  Failed to summarize directory {}: {}, using fallback",
+                    dir.name, e
+                );
+                dossiers.push(fallback_dossier(&dir));
             }
         }
     }
