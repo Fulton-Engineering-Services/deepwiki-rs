@@ -46,8 +46,23 @@ impl RelationshipsAnalyze {
                 over_kb,
             );
 
+            // The prompt compressor hard-fails above 150k tokens, and on
+            // large monorepos the full index far exceeds that (e.g. 1860 dirs
+            // / 351k tokens). Build the selection index from an
+            // importance-ranked, budget-capped subset instead - Directory
+            // Selection only picks the top 5-20 architecturally significant
+            // directories anyway.
+            let (selection_index, included) = self.build_capped_index_content(directory_dossiers);
+            if included < directory_dossiers.len() {
+                println!(
+                    "   ✂️  Selection index truncated to top {} of {} directories by importance (budget ~100k tokens)",
+                    included,
+                    directory_dossiers.len(),
+                );
+            }
+
             let selection = self
-                .select_directories_and_files(context, directory_dossiers, &index_content)
+                .select_directories_and_files(context, directory_dossiers, &selection_index)
                 .await?;
 
             // Cache selection for reuse by other agents
@@ -123,26 +138,65 @@ impl RelationshipsAnalyze {
     fn build_index_content(&self, dossiers: &[DirectoryDossier]) -> String {
         dossiers
             .iter()
-            .map(|d| {
-                let files_summary = d
-                    .file_insights
-                    .iter()
-                    .map(|fi| format!("  - {} (score: {:.2}, purpose: {:?})", fi.name, fi.importance_score, fi.code_purpose))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+            .map(|d| self.build_index_entry(d))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 
+    /// Build the index entry for a single directory.
+    fn build_index_entry(&self, d: &DirectoryDossier) -> String {
+        let files_summary = d
+            .file_insights
+            .iter()
+            .map(|fi| {
                 format!(
-                    "### {} | path: {} | purpose: {:?} | importance: {:.2}\nSummary: {}\nFiles:\n{}",
-                    d.name,
-                    d.path.to_string_lossy(),
-                    d.purpose,
-                    d.importance_score,
-                    d.summary,
-                    files_summary
+                    "  - {} (score: {:.2}, purpose: {:?})",
+                    fi.name, fi.importance_score, fi.code_purpose
                 )
             })
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n");
+
+        format!(
+            "### {} | path: {} | purpose: {:?} | importance: {:.2}\nSummary: {}\nFiles:\n{}",
+            d.name,
+            d.path.to_string_lossy(),
+            d.purpose,
+            d.importance_score,
+            d.summary,
+            files_summary
+        )
+    }
+
+    /// Build an importance-ranked, budget-capped selection index. Returns the
+    /// index content and the number of directories included. The budget keeps
+    /// the index comfortably under the prompt compressor's 150k-token ceiling
+    /// (estimated at ~4 chars/token, matching the tool's own estimator).
+    fn build_capped_index_content(&self, dossiers: &[DirectoryDossier]) -> (String, usize) {
+        const INDEX_CHAR_BUDGET: usize = 100_000 * 4;
+
+        let mut ranked: Vec<&DirectoryDossier> = dossiers.iter().collect();
+        ranked.sort_by(|a, b| {
+            b.importance_score
+                .partial_cmp(&a.importance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.file_count.cmp(&a.file_count))
+        });
+
+        let mut content = String::new();
+        let mut included = 0usize;
+        for d in ranked {
+            let entry = self.build_index_entry(d);
+            if included > 0 && content.len() + entry.len() + 2 > INDEX_CHAR_BUDGET {
+                break;
+            }
+            if included > 0 {
+                content.push_str("\n\n");
+            }
+            content.push_str(&entry);
+            included += 1;
+        }
+        (content, included)
     }
 
     /// Phase 1: ask LLM which directories and files are architecturally significant.
