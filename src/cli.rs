@@ -67,6 +67,10 @@ pub struct Args {
     #[arg(long)]
     pub max_tokens: Option<u32>,
 
+    /// Model context window length in tokens
+    #[arg(long)]
+    pub llm_context_length: Option<usize>,
+
     /// Temperature parameter
     #[arg(long)]
     pub temperature: Option<f64>,
@@ -207,6 +211,9 @@ impl Args {
         }
         if let Some(max_tokens) = self.max_tokens {
             config.llm.max_tokens = max_tokens;
+        }
+        if let Some(llm_context_length) = self.llm_context_length {
+            config.llm.context_length = llm_context_length;
         }
         if let Some(temperature) = self.temperature {
             config.llm.temperature = Some(temperature);

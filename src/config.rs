@@ -180,6 +180,12 @@ pub struct LLMConfig {
     /// Maximum tokens
     pub max_tokens: u32,
 
+    /// Model context window length in tokens. Bounds how much content the
+    /// prompt compressor will attempt to process in a single call.
+    /// Default: 150000 (conservative; raise for long-context models).
+    #[serde(default = "default_context_length")]
+    pub context_length: usize,
+
     /// Temperature (optional - some models like o3-mini don't support it)
     pub temperature: Option<f64>,
 
@@ -207,6 +213,10 @@ pub struct LLMConfig {
 
 fn default_max_turns() -> usize {
     100
+}
+
+fn default_context_length() -> usize {
+    150_000
 }
 
 fn default_tool_concurrency() -> usize {
@@ -755,6 +765,7 @@ impl Default for LLMConfig {
             model_efficient: String::from("Qwen/Qwen3-Next-80B-A3B-Instruct"),
             model_powerful: String::from("Qwen/Qwen3.5-397B-A17B"),
             max_tokens: 131072,
+            context_length: 150_000,
             temperature: Some(0.1),
             retry_attempts: 3,
             retry_delay_ms: 5000,

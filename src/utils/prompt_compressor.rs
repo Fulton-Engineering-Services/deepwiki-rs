@@ -174,11 +174,15 @@ impl PromptCompressor {
             progress: None,
         };
 
-        // Check if content is already too large for compression
-        if original_estimation.estimated_tokens > 150000 {
+        // Check if content is already too large for compression, bounded by
+        // the configured model context length (default 150k; raise
+        // llm.context_length for long-context models).
+        let ceiling = context.config.llm.context_length;
+        if original_estimation.estimated_tokens > ceiling {
             return Err(anyhow::anyhow!(
-                "Content too large for compression ({} tokens), maximum supported is 150000 tokens",
-                original_estimation.estimated_tokens
+                "Content too large for compression ({} tokens), maximum supported is {} tokens (llm.context_length)",
+                original_estimation.estimated_tokens,
+                ceiling
             ));
         }
 

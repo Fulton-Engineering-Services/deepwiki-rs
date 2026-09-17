@@ -46,18 +46,21 @@ impl RelationshipsAnalyze {
                 over_kb,
             );
 
-            // The prompt compressor hard-fails above 150k tokens, and on
-            // large monorepos the full index far exceeds that (e.g. 1860 dirs
-            // / 351k tokens). Build the selection index from an
-            // importance-ranked, budget-capped subset instead - Directory
-            // Selection only picks the top 5-20 architecturally significant
-            // directories anyway.
-            let (selection_index, included) = self.build_capped_index_content(directory_dossiers);
+            // The prompt compressor hard-fails above llm.context_length
+            // tokens, and on large monorepos the full index can exceed that.
+            // Build the selection index from an importance-ranked subset
+            // budgeted at 80% of the context length (estimated at ~4
+            // chars/token) - Directory Selection only picks the top 5-20
+            // architecturally significant directories anyway.
+            let index_token_budget = context.config.llm.context_length * 4 / 5;
+            let (selection_index, included) =
+                self.build_capped_index_content(directory_dossiers, index_token_budget * 4);
             if included < directory_dossiers.len() {
                 println!(
-                    "   ✂️  Selection index truncated to top {} of {} directories by importance (budget ~100k tokens)",
+                    "   ✂️  Selection index truncated to top {} of {} directories by importance (budget ~{} tokens)",
                     included,
                     directory_dossiers.len(),
+                    index_token_budget,
                 );
             }
 
@@ -169,12 +172,14 @@ impl RelationshipsAnalyze {
     }
 
     /// Build an importance-ranked, budget-capped selection index. Returns the
-    /// index content and the number of directories included. The budget keeps
-    /// the index comfortably under the prompt compressor's 150k-token ceiling
-    /// (estimated at ~4 chars/token, matching the tool's own estimator).
-    fn build_capped_index_content(&self, dossiers: &[DirectoryDossier]) -> (String, usize) {
-        const INDEX_CHAR_BUDGET: usize = 100_000 * 4;
-
+    /// index content and the number of directories included. The caller sizes
+    /// char_budget from llm.context_length so the index stays comfortably
+    /// under the prompt compressor's ceiling.
+    fn build_capped_index_content(
+        &self,
+        dossiers: &[DirectoryDossier],
+        char_budget: usize,
+    ) -> (String, usize) {
         let mut ranked: Vec<&DirectoryDossier> = dossiers.iter().collect();
         ranked.sort_by(|a, b| {
             b.importance_score
@@ -187,7 +192,7 @@ impl RelationshipsAnalyze {
         let mut included = 0usize;
         for d in ranked {
             let entry = self.build_index_entry(d);
-            if included > 0 && content.len() + entry.len() + 2 > INDEX_CHAR_BUDGET {
+            if included > 0 && content.len() + entry.len() + 2 > char_budget {
                 break;
             }
             if included > 0 {
