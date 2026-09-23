@@ -1,4 +1,7 @@
 pub mod architecture_researcher;
+pub mod area_mapper;
+pub mod area_refiner;
+pub mod area_synthesis;
 pub mod boundary_analyzer;
 pub mod database_overview_analyzer;
 pub mod domain_modules_detector;

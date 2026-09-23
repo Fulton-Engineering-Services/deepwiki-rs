@@ -179,6 +179,21 @@ disable_preset_tools = false
 # tool_concurrency = 4
 
 # ============================================================================
+# Hierarchical Macro-Scan (large monorepos)
+# ============================================================================
+# Auto-activates when the number of directory dossiers exceeds
+# dossier_threshold, splitting the project into coarse areas, refining each
+# into leaf scopes, running the normal pipeline per area, then synthesizing
+# integration docs bottom-up. Override with CLI --macro-scan / --no-macro-scan.
+#
+# [macro_scan]
+# enabled = null                 # null = auto, true/false = force (default: null)
+# dossier_threshold = 150        # dossier count that triggers auto-activation
+# scope_max_dossiers = 150       # target max dossiers per leaf area
+# max_areas = 25                 # maximum top-level coarse areas
+# max_depth = 4                  # maximum DFS refinement depth
+
+# ============================================================================
 # Cache Configuration
 # ============================================================================
 # Cache settings (all have defaults, uncomment to override)

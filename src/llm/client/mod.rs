@@ -4,6 +4,7 @@ use anyhow::Result;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::time::Duration;
 
 use crate::{config::Config, llm::client::utils::evaluate_befitting_model};
 
@@ -53,20 +54,34 @@ impl LLMClient {
         let max_retries = llm_config.retry_attempts;
         let retry_delay_ms = llm_config.retry_delay_ms;
         let mut retries = 0;
+        let mut delay = retry_delay_ms;
 
         loop {
             match operation().await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     retries += 1;
+                    let err_str = err.to_string();
+                    let is_rate_limit = err_str.contains("429")
+                        || err_str.contains("503")
+                        || err_str.to_lowercase().contains("rate limit")
+                        || err_str.to_lowercase().contains("too many requests");
                     eprintln!(
-                        "❌ Model service call error, retrying (attempt {} / {}): {}",
-                        retries, max_retries, err
+                        "❌ Model service call error (attempt {}/{}): {}{}",
+                        retries,
+                        max_retries,
+                        if is_rate_limit {
+                            "[rate-limit/server-error] "
+                        } else {
+                            ""
+                        },
+                        err
                     );
                     if retries >= max_retries {
                         return Err(err);
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    delay = (delay * 2).min(60_000);
                 }
             }
         }
@@ -239,7 +254,9 @@ impl LLMClient {
             evaluate_befitting_model(&self.config.llm, system_prompt, user_prompt);
         let agent = agent_builder.build_agent_without_tools(system_prompt, &model_name);
 
-        self.retry_with_backoff(|| async { agent.prompt(user_prompt, 1).await.map_err(|e| e.into()) })
-            .await
+        self.retry_with_backoff(|| async {
+            agent.prompt(user_prompt, 1).await.map_err(|e| e.into())
+        })
+        .await
     }
 }

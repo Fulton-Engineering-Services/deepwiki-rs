@@ -6,7 +6,7 @@ use crate::types::code_releationship::RelationshipAnalysis;
 use crate::{
     generator::context::GeneratorContext,
     types::{DirectoryDossier, DirectorySelection},
-    utils::prompt_compressor::{CompressionConfig, PromptCompressor},
+    utils::prompt_compressor::{CompressionConfig, CompressionResult, PromptCompressor},
 };
 
 pub struct RelationshipsAnalyze {
@@ -117,7 +117,11 @@ impl RelationshipsAnalyze {
                 .join("\n\n");
             let selected_kb = selected_content.len() / 1024;
             let selected_dir_count = selection.selected_directories.len();
-            let selected_file_count: usize = selection.selected_files.iter().map(|sf| sf.file_names.len()).sum();
+            let selected_file_count: usize = selection
+                .selected_files
+                .iter()
+                .map(|sf| sf.file_names.len())
+                .sum();
             println!(
                 "   ✅ Selected {} dirs, {} files — analysis content: {} KB",
                 selected_dir_count, selected_file_count, selected_kb,
@@ -230,10 +234,35 @@ Rules:
 - Use absolute paths matching exactly those in the index"#
             .to_string();
 
-        let compression_result = self
+        let compression_result = match self
             .prompt_compressor
             .compress_if_needed(context, index_content, "Directory Selection Index")
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                println!(
+                    "   ⚠️ Compression failed during directory selection: {}, falling back to capped index.",
+                    e
+                );
+                let budget = context.config.llm.context_length * 4 / 5;
+                let (capped, included) =
+                    self.build_capped_index_content(_directory_dossiers, budget * 4);
+                println!(
+                    "   ✂️  Fallback selection index truncated to top {} directories",
+                    included
+                );
+                let compressed_tokens = capped.len() / 4;
+                CompressionResult {
+                    compressed_content: capped,
+                    original_tokens: index_content.len() / 4,
+                    compressed_tokens,
+                    compression_ratio: 1.0,
+                    was_compressed: false,
+                    compression_summary: "Fallback capped index".to_string(),
+                }
+            }
+        };
 
         if compression_result.was_compressed {
             println!(
@@ -298,7 +327,7 @@ Constraints:
 - Use integer values for "importance" and "level".
 - Keep values concise and architecture-focused.
 "#
-            .to_string();
+        .to_string();
 
         let dossiers_content = self.build_dossiers_content(directory_dossiers);
 
@@ -383,7 +412,7 @@ Constraints:
 - Use integer values for "importance" and "level".
 - Keep values concise and architecture-focused.
 "#
-            .to_string();
+        .to_string();
 
         // Build selected subset of dossiers + file_insights
         let selected_dir_set: std::collections::HashSet<_> =

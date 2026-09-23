@@ -114,6 +114,14 @@ pub struct Args {
     /// Show only directories when files exceed this count
     #[arg(long)]
     pub boundary_only_directories_when_files_more_than: Option<usize>,
+
+    /// Enable hierarchical macro-scan (auto by default)
+    #[arg(long)]
+    pub macro_scan: bool,
+
+    /// Disable hierarchical macro-scan
+    #[arg(long)]
+    pub no_macro_scan: bool,
 }
 
 /// CLI subcommands
@@ -143,7 +151,9 @@ impl Args {
 
         let mut config = if let Some(config_path) = &self.config {
             // If config file path is explicitly specified, load from that path
-            let msg = target_lang.msg_config_read_error().replace("{:?}", &format!("{:?}", config_path));
+            let msg = target_lang
+                .msg_config_read_error()
+                .replace("{:?}", &format!("{:?}", config_path));
             match Config::from_file(config_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -158,7 +168,9 @@ impl Args {
                 .join("litho.toml");
 
             if default_config_path.exists() {
-                let msg = target_lang.msg_config_read_error().replace("{:?}", &format!("{:?}", default_config_path));
+                let msg = target_lang
+                    .msg_config_read_error()
+                    .replace("{:?}", &format!("{:?}", default_config_path));
                 match Config::from_file(&default_config_path) {
                     Ok(c) => c,
                     Err(e) => {
@@ -187,7 +199,9 @@ impl Args {
             if let Ok(provider) = provider_str.parse::<LLMProvider>() {
                 config.llm.provider = provider;
             } else {
-                let msg = target_lang.msg_unknown_provider().replace("{}", &provider_str);
+                let msg = target_lang
+                    .msg_unknown_provider()
+                    .replace("{}", &provider_str);
                 eprintln!("{}", msg);
             }
         }
@@ -231,7 +245,9 @@ impl Args {
             if let Ok(target_language) = target_language_str.parse::<TargetLanguage>() {
                 config.target_language = target_language;
             } else {
-                let msg = target_lang.msg_unknown_language().replace("{}", &target_language_str);
+                let msg = target_lang
+                    .msg_unknown_language()
+                    .replace("{}", &target_language_str);
                 eprintln!("{}", msg);
             }
         }
@@ -249,7 +265,17 @@ impl Args {
             config.boundary_analysis.include_source_code = include_source;
         }
         if let Some(only_dirs_threshold) = self.boundary_only_directories_when_files_more_than {
-            config.boundary_analysis.only_directories_when_files_more_than = Some(only_dirs_threshold);
+            config
+                .boundary_analysis
+                .only_directories_when_files_more_than = Some(only_dirs_threshold);
+        }
+
+        // Macro-scan configuration overrides
+        if self.macro_scan {
+            config.macro_scan.enabled = Some(true);
+        }
+        if self.no_macro_scan {
+            config.macro_scan.enabled = Some(false);
         }
 
         // Workflow stage flags

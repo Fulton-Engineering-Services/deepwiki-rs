@@ -503,6 +503,11 @@ deepwiki-rs -p ./src --disable-preset-tools --llm-api-base-url <your llm provide
 
 # Set up both the efficient model and the powerful model simultaneously
 deepwiki-rs -p ./src --model-efficient GPT-5-mini --model-poweruful GPT-5-Pro --llm-api-base-url <your llm provider base-api> --llm_api_key <your api key> --model-efficient GPT-5-mini
+
+# Large monorepos: force or disable the hierarchical macro-scan
+# (auto-enabled when directory dossiers exceed macro_scan.dossier_threshold, default 150)
+deepwiki-rs -p ./monorepo --macro-scan    # force area-based hierarchical scan
+deepwiki-rs -p ./monorepo --no-macro-scan # force the flat single-pass pipeline
 ```
 
 ## 📚 External Knowledge Integration

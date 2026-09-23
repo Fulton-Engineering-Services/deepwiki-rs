@@ -4,6 +4,7 @@ use crate::generator::compose::agents::database_editor::DatabaseEditor;
 use crate::generator::compose::agents::key_modules_insight_editor::KeyModulesInsightEditor;
 use crate::generator::compose::agents::overview_editor::OverviewEditor;
 use crate::generator::compose::agents::workflow_editor::WorkflowEditor;
+use crate::generator::compose::memory::MemoryScope as ComposeMemoryScope;
 use crate::generator::context::GeneratorContext;
 use crate::generator::outlet::DocTree;
 use crate::generator::preprocess::memory::{MemoryScope, ScopedKeys};
@@ -23,7 +24,10 @@ pub struct DocumentationComposer;
 impl DocumentationComposer {
     pub async fn execute(&self, context: &GeneratorContext, doc_tree: &mut DocTree) -> Result<()> {
         println!("\n🤖 Executing documentation generation process...");
-        println!("📝 Target language: {}", context.config.target_language.display_name());
+        println!(
+            "📝 Target language: {}",
+            context.config.target_language.display_name()
+        );
 
         let overview_editor = OverviewEditor::default();
         overview_editor.execute(context).await?;
@@ -38,6 +42,29 @@ impl DocumentationComposer {
         key_modules_insight_editor
             .execute(context, doc_tree)
             .await?;
+
+        // Insert hierarchical area integration docs if macro scan produced them.
+        if let Some(area_integration_keys) = context
+            .get_from_memory::<Vec<String>>(
+                ComposeMemoryScope::DOCUMENTATION,
+                "__area_integration_keys__",
+            )
+            .await
+        {
+            for key in area_integration_keys {
+                if let Some(markdown) = context
+                    .get_from_memory::<String>(ComposeMemoryScope::DOCUMENTATION, &key)
+                    .await
+                {
+                    if markdown.trim().is_empty() {
+                        continue;
+                    }
+                    let file_name = key.strip_prefix("AreaIntegration_").unwrap_or(&key);
+                    let relative_path = format!("Area-Integration/{}.md", file_name);
+                    doc_tree.insert(&key, &relative_path);
+                }
+            }
+        }
 
         let boundary_editor = BoundaryEditor::default();
         boundary_editor.execute(context).await?;
@@ -54,18 +81,25 @@ impl DocumentationComposer {
     /// Check if the project has database-related files
     async fn has_database_files(&self, context: &GeneratorContext) -> bool {
         if let Some(insights) = context
-            .get_from_memory::<CodeAndDirectoryInsights>(MemoryScope::PREPROCESS, ScopedKeys::CODE_INSIGHTS)
+            .get_from_memory::<CodeAndDirectoryInsights>(
+                MemoryScope::PREPROCESS,
+                ScopedKeys::CODE_INSIGHTS,
+            )
             .await
         {
             insights.directory_insights.iter().any(|dossier| {
                 dossier.purpose == DirectoryPurpose::Database
                     || dossier.name.to_lowercase().contains("database")
                     || dossier.name.to_lowercase().contains("db")
-            }) || insights.directory_insights.iter().flat_map(|d| d.file_insights.iter()).any(|fi| {
-                fi.code_purpose == CodePurpose::Database
-                    || fi.file_path.to_string_lossy().ends_with(".sql")
-                    || fi.file_path.to_string_lossy().ends_with(".sqlproj")
-            })
+            }) || insights
+                .directory_insights
+                .iter()
+                .flat_map(|d| d.file_insights.iter())
+                .any(|fi| {
+                    fi.code_purpose == CodePurpose::Database
+                        || fi.file_path.to_string_lossy().ends_with(".sql")
+                        || fi.file_path.to_string_lossy().ends_with(".sqlproj")
+                })
         } else {
             false
         }

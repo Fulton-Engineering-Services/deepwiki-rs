@@ -55,7 +55,15 @@ impl KeyModulesInsightEditor {
 
                 doc_tree.insert(
                     &insight_key,
-                    format!("{}/{}.md", context.config.target_language.get_directory_name("deep_exploration"), &domain_name).as_str(),
+                    format!(
+                        "{}/{}.md",
+                        context
+                            .config
+                            .target_language
+                            .get_directory_name("deep_exploration"),
+                        &domain_name
+                    )
+                    .as_str(),
                 );
             }
         }
@@ -90,7 +98,7 @@ impl StepForwardAgent for KeyModuleInsightEditor {
     }
 
     fn should_include_timestamp(&self) -> bool {
-        true
+        false
     }
 
     fn data_config(&self) -> AgentDataConfig {
@@ -103,7 +111,10 @@ impl StepForwardAgent for KeyModuleInsightEditor {
                 DataSource::ResearchResult(self.insight_key.to_string()),
             ],
             // Use architecture and database docs for key module documentation
-            optional_sources: vec![DataSource::knowledge_categories(vec!["architecture", "database"])],
+            optional_sources: vec![DataSource::knowledge_categories(vec![
+                "architecture",
+                "database",
+            ])],
         }
     }
 

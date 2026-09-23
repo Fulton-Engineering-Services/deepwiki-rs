@@ -1,4 +1,4 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -136,6 +136,10 @@ pub struct Config {
     #[serde(default)]
     pub boundary_analysis: BoundaryAnalysisConfig,
 
+    /// Hierarchical macro-scan configuration for large codebases
+    #[serde(default)]
+    pub macro_scan: MacroScanConfig,
+
     /// Skip the preprocessing stage (CLI --skip-preprocessing)
     #[serde(default)]
     pub skip_preprocessing: bool,
@@ -259,11 +263,11 @@ pub struct BoundaryAnalysisConfig {
 }
 
 fn default_code_insights_limit() -> usize {
-    25  // Reduced default to balance performance and quality
+    25 // Reduced default to balance performance and quality
 }
 
 fn default_files_threshold() -> Option<usize> {
-    Some(100)  // Reduced threshold for better performance
+    Some(100) // Reduced threshold for better performance
 }
 
 /// Knowledge configuration for external documentation sources
@@ -431,6 +435,16 @@ impl Config {
 
         // If not configured or empty, auto-infer
         self.infer_project_name()
+    }
+
+    /// Determine whether hierarchical macro-scan should be active.
+    ///
+    /// CLI overrides take precedence; otherwise auto-activate when the number
+    /// of dossiers exceeds the configured threshold.
+    pub fn macro_scan_enabled(&self, dossier_count: usize) -> bool {
+        self.macro_scan
+            .enabled
+            .unwrap_or(dossier_count > self.macro_scan.dossier_threshold)
     }
 
     /// Auto-infer project name
@@ -747,6 +761,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             knowledge: KnowledgeConfig::default(),
             boundary_analysis: BoundaryAnalysisConfig::default(),
+            macro_scan: MacroScanConfig::default(),
             skip_preprocessing: false,
             skip_research: false,
             skip_documentation: false,
@@ -798,6 +813,38 @@ impl Default for BoundaryAnalysisConfig {
     }
 }
 
+/// Hierarchical macro-scan configuration for large codebases.
+///
+/// When enabled, Litho builds a coarse area map of the project, refines it
+/// recursively, and runs the standard per-module pipeline within each leaf
+/// area rather than over the entire project at once.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct MacroScanConfig {
+    /// `Some(true)` / `Some(false)` overrides auto-detection; `None` means auto.
+    pub enabled: Option<bool>,
+    /// Number of directory dossiers that triggers auto-activation.
+    pub dossier_threshold: usize,
+    /// Target maximum number of dossiers in a single leaf area.
+    pub scope_max_dossiers: usize,
+    /// Maximum number of top-level coarse areas.
+    pub max_areas: usize,
+    /// Maximum recursion depth for DFS refinement.
+    pub max_depth: usize,
+}
+
+impl Default for MacroScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            dossier_threshold: 150,
+            scope_max_dossiers: 150,
+            max_areas: 25,
+            max_depth: 4,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,7 +852,7 @@ mod tests {
     #[test]
     fn test_boundary_analysis_default_values() {
         let config = BoundaryAnalysisConfig::default();
-        
+
         assert_eq!(config.code_insights_limit, 25);
         assert_eq!(config.include_source_code, false);
         assert_eq!(config.only_directories_when_files_more_than, Some(100));

@@ -106,7 +106,11 @@ impl PromptCompressor {
             .get_compression_cache(content, content_type)
             .await
         {
-            let msg = context.config.target_language.msg_cache_compression_hit().replace("{}", content_type);
+            let msg = context
+                .config
+                .target_language
+                .msg_cache_compression_hit()
+                .replace("{}", content_type);
             println!("{}", msg);
             let compressed_estimation = self.token_estimator.estimate_tokens(&cached_result);
             let actual_ratio =
@@ -179,11 +183,24 @@ impl PromptCompressor {
         // llm.context_length for long-context models).
         let ceiling = context.config.llm.context_length;
         if original_estimation.estimated_tokens > ceiling {
-            return Err(anyhow::anyhow!(
-                "Content too large for compression ({} tokens), maximum supported is {} tokens (llm.context_length)",
-                original_estimation.estimated_tokens,
-                ceiling
-            ));
+            println!(
+                "   🚨 Content too large for compression ({} tokens > {} ceiling); applying hard truncate.",
+                original_estimation.estimated_tokens, ceiling
+            );
+            let truncated = Self::truncate_to_budget(content, ceiling);
+            let truncated_estimation = self.token_estimator.estimate_tokens(&truncated);
+            return Ok(CompressionResult {
+                compressed_content: truncated,
+                original_tokens: original_estimation.estimated_tokens,
+                compressed_tokens: truncated_estimation.estimated_tokens,
+                compression_ratio: truncated_estimation.estimated_tokens as f64
+                    / original_estimation.estimated_tokens as f64,
+                was_compressed: true,
+                compression_summary: format!(
+                    "Hard truncation applied: {} -> {} tokens",
+                    original_estimation.estimated_tokens, truncated_estimation.estimated_tokens
+                ),
+            });
         }
 
         let compressed_content = prompt(context, params).await?;
@@ -248,9 +265,15 @@ Output only the condensed information, with zero additional comments or explanat
 
         for pattern in &self.compression_config.preserve_patterns {
             let instruction = match pattern {
-                PreservePattern::FunctionSignatures => "Preserve all function signatures and method definitions",
-                PreservePattern::TypeDefinitions => "Preserve all type definitions and data structures",
-                PreservePattern::ImportStatements => "Preserve important import and dependency declarations",
+                PreservePattern::FunctionSignatures => {
+                    "Preserve all function signatures and method definitions"
+                }
+                PreservePattern::TypeDefinitions => {
+                    "Preserve all type definitions and data structures"
+                }
+                PreservePattern::ImportStatements => {
+                    "Preserve important import and dependency declarations"
+                }
                 PreservePattern::InterfaceDefinitions => "Preserve all interface definitions",
                 PreservePattern::ErrorHandling => "Preserve error handling related logic",
                 PreservePattern::Configuration => "Preserve configuration related information",
@@ -259,6 +282,27 @@ Output only the condensed information, with zero additional comments or explanat
         }
 
         instructions.join("\n")
+    }
+
+    /// Hard-truncate content to a token budget (char-boundary safe).
+    fn truncate_to_budget(content: &str, token_budget: usize) -> String {
+        let char_budget = token_budget.saturating_mul(4);
+        if content.len() <= char_budget {
+            return content.to_string();
+        }
+        let truncated: String = content.chars().take(char_budget).collect();
+        if let Some(idx) = truncated.rfind('\n')
+            && idx > 100
+        {
+            return format!(
+                "{}\n\n[Content truncated due to size limitations]",
+                &truncated[..idx]
+            );
+        }
+        format!(
+            "{}\n\n[Content truncated due to size limitations]",
+            truncated
+        )
     }
 
     /// Create uncompressed result
@@ -271,7 +315,10 @@ Output only the condensed information, with zero additional comments or explanat
             compressed_tokens: estimation.estimated_tokens,
             compression_ratio: 1.0,
             was_compressed: false,
-            compression_summary: format!("Content not compressed, token count: {}", estimation.estimated_tokens),
+            compression_summary: format!(
+                "Content not compressed, token count: {}",
+                estimation.estimated_tokens
+            ),
         }
     }
 }
