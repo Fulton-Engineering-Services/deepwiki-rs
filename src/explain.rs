@@ -84,7 +84,7 @@ struct Evaluation {
 
 impl Evaluation {
     /// All matching rules in evaluation order (root-first).
-    fn all_exclusions(&self, git_untracked: bool) -> Vec<Exclusion> {
+    fn all_exclusions(&self, git: &GitNote) -> Vec<Exclusion> {
         let mut out: Vec<Exclusion> = self
             .dir_rows
             .iter()
@@ -94,11 +94,20 @@ impl Evaluation {
         if let Some(size) = &self.size_row {
             out.push(size.clone());
         }
-        if git_untracked {
-            out.push(Exclusion::new(
+        match git {
+            GitNote::File { tracked: false } => out.push(Exclusion::new(
                 ExclusionKind::Untracked,
                 "not tracked by git (git_tracked_only = true; structure walker only)".to_string(),
-            ));
+            )),
+            // The walker gates per file: a directory with zero tracked files
+            // contributes nothing to the structure.
+            GitNote::Dir { tracked_files: 0 } => out.push(Exclusion::new(
+                ExclusionKind::Untracked,
+                "no tracked files under this directory (git_tracked_only = true; \
+                 structure walker skips its files)"
+                    .to_string(),
+            )),
+            _ => {}
         }
         out
     }
@@ -184,42 +193,43 @@ fn load_config(explicit: Option<&PathBuf>) -> Result<(Config, String)> {
 }
 
 fn git_note(root: &Path, rel: &Path, is_dir: bool) -> GitNote {
-    let in_repo = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
+    // Mirrors StructureExtractor::get_tracked_files exactly: `git ls-files`
+    // with cwd at the project root. An EMPTY tracked set means the gate is
+    // treated as inactive (the walker only applies it when the set is
+    // non-empty) — this matters for shadow roots like .litho/tree/repo,
+    // which live inside the repo but hold no tracked files of their own.
+    let out = match Command::new("git")
+        .args(["ls-files"])
         .current_dir(root)
-        .output();
-    match in_repo {
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(_) => return GitNote::Inactive("git ls-files failed".to_string()),
         Err(e) => return GitNote::Inactive(format!("git unavailable: {}", e)),
-        Ok(out) if !out.status.success() => {
-            return GitNote::Inactive("not a git repository".to_string());
-        }
-        _ => {}
+    };
+
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    if lines.is_empty() {
+        return GitNote::Inactive(
+            "no git-tracked files at this root (git_tracked_only gate inactive)".to_string(),
+        );
     }
 
+    // `git ls-files` prints paths relative to cwd (= the project root),
+    // the same shape the walker joins against.
+    let rel_display = rel.to_string_lossy();
+    let target = rel_display.trim_start_matches("./");
     if is_dir {
-        let out = Command::new("git")
-            .args(["ls-files", "--"])
-            .arg(rel)
-            .current_dir(root)
-            .output();
-        match out {
-            Ok(out) if out.status.success() => {
-                let tracked_files = String::from_utf8_lossy(&out.stdout).lines().count();
-                GitNote::Dir { tracked_files }
-            }
-            _ => GitNote::Inactive("git ls-files failed".to_string()),
+        let prefix = format!("{}/", target);
+        GitNote::Dir {
+            tracked_files: lines.iter().filter(|l| l.starts_with(&prefix)).count(),
         }
     } else {
-        let out = Command::new("git")
-            .args(["ls-files", "--error-unmatch", "--"])
-            .arg(rel)
-            .current_dir(root)
-            .output();
-        match out {
-            Ok(out) => GitNote::File {
-                tracked: out.status.success(),
-            },
-            Err(e) => GitNote::Inactive(format!("git unavailable: {}", e)),
+        GitNote::File {
+            tracked: lines.iter().any(|l| l == target),
         }
     }
 }
@@ -304,7 +314,7 @@ fn print_report(
         }
         GitNote::Dir { .. } => {
             println!(
-                "  !!   git_tracked_only — no tracked files under this directory \
+                "  EXCL git_tracked_only: no tracked files under this directory \
                  (the structure walker skips its files)"
             );
         }
@@ -312,8 +322,7 @@ fn print_report(
     println!("  ok   max_file_size on read — enforced by the file-explorer tool");
     println!();
 
-    let git_untracked = matches!(git, GitNote::File { tracked: false });
-    let matches: Vec<Exclusion> = eval.all_exclusions(git_untracked);
+    let matches: Vec<Exclusion> = eval.all_exclusions(git);
     if matches.is_empty() {
         println!("verdict: INCLUDED — no exclusion rule matched");
     } else {
@@ -368,7 +377,7 @@ mod tests {
         assert!(ev.dir_rows[..3].iter().all(|(_, r)| r.is_empty()));
         assert_eq!(ev.dir_rows[3].1[0].kind, ExclusionKind::ExcludedDir);
 
-        let all = ev.all_exclusions(false);
+        let all = ev.all_exclusions(&GitNote::Inactive("test".to_string()));
         assert_eq!(all[0].kind, ExclusionKind::ExcludedDir);
     }
 
@@ -383,7 +392,10 @@ mod tests {
             false,
             config.max_file_size,
         );
-        assert!(ev.all_exclusions(false).is_empty());
+        assert!(
+            ev.all_exclusions(&GitNote::Inactive("test".to_string()))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -401,7 +413,7 @@ mod tests {
             config.max_file_size,
         );
         assert!(ev.file_rows.is_empty());
-        let all = ev.all_exclusions(false);
+        let all = ev.all_exclusions(&GitNote::Inactive("test".to_string()));
         assert!(all.iter().any(|e| e.kind == ExclusionKind::HiddenDir));
     }
 
@@ -418,7 +430,7 @@ mod tests {
             false,
             config.max_file_size,
         );
-        let all = ev.all_exclusions(false);
+        let all = ev.all_exclusions(&GitNote::Inactive("test".to_string()));
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].kind, ExclusionKind::ExcludedFile);
     }
@@ -434,8 +446,11 @@ mod tests {
             false,
             config.max_file_size,
         );
-        assert!(ev.all_exclusions(false).is_empty());
-        let with_git = ev.all_exclusions(true);
+        assert!(
+            ev.all_exclusions(&GitNote::Inactive("test".to_string()))
+                .is_empty()
+        );
+        let with_git = ev.all_exclusions(&GitNote::File { tracked: false });
         assert_eq!(with_git.len(), 1);
         assert_eq!(with_git[0].kind, ExclusionKind::Untracked);
     }
