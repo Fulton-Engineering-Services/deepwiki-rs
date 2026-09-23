@@ -9,12 +9,18 @@ use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::types::FileInfo;
-use crate::utils::file_utils::{is_test_file, resolve_path_within};
+use crate::utils::exclusion::{Exclusion, ExclusionFilter, ExclusionKind};
+use crate::utils::file_utils::resolve_path_within;
 
 /// File exploration tool
 #[derive(Debug, Clone)]
 pub struct AgentToolFileExplorer {
     config: Config,
+    /// Shared exclusion rules — the same filter the structure walker and the
+    /// `explain` subcommand use (see `utils::exclusion`). Matching is done
+    /// against project-RELATIVE paths so rules like `.litho` can never
+    /// self-exclude the shadow tree the scan root lives in.
+    filter: ExclusionFilter,
 }
 
 /// File exploration parameters
@@ -39,7 +45,8 @@ pub struct FileExplorerResult {
 
 impl AgentToolFileExplorer {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        let filter = ExclusionFilter::new(&config);
+        Self { config, filter }
     }
 
     /// Build a result explaining that a path was sandboxed out.
@@ -71,6 +78,23 @@ impl AgentToolFileExplorer {
         if !target_path.exists() {
             return Ok(FileExplorerResult {
                 insights: vec![format!("Path does not exist: {}", target_path.display())],
+                ..Default::default()
+            });
+        }
+
+        // Surface the reason instead of silently returning an empty listing
+        // when the requested directory itself is out of scope.
+        let target_exclusions = self.exclusions_for(&target_path);
+        if !target_exclusions.is_empty() {
+            return Ok(FileExplorerResult {
+                insights: vec![format!(
+                    "Directory is excluded from analysis: {}",
+                    target_exclusions
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )],
                 ..Default::default()
             });
         }
@@ -169,7 +193,10 @@ impl AgentToolFileExplorer {
 
         if !search_path.exists() {
             return Ok(FileExplorerResult {
-                insights: vec![format!("Search path does not exist: {}", search_path.display())],
+                insights: vec![format!(
+                    "Search path does not exist: {}",
+                    search_path.display()
+                )],
                 ..Default::default()
             });
         }
@@ -243,9 +270,17 @@ impl AgentToolFileExplorer {
             });
         }
 
-        if self.is_ignored(&target_path) {
+        let exclusions = self.exclusions_for(&target_path);
+        if !exclusions.is_empty() {
             return Ok(FileExplorerResult {
-                insights: vec![format!("File is ignored: {}", target_path.display())],
+                insights: vec![format!(
+                    "File is excluded from analysis: {}",
+                    exclusions
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )],
                 ..Default::default()
             });
         }
@@ -279,78 +314,39 @@ impl AgentToolFileExplorer {
         })
     }
 
+    /// Every reason `path` is out of scope, using the shared filter on the
+    /// project-relative path (plus the explorer-only size cap).
+    fn exclusions_for(&self, path: &Path) -> Vec<Exclusion> {
+        let rel = path.strip_prefix(&self.config.project_path).unwrap_or(path);
+        let is_dir = path.is_dir();
+
+        let mut exclusions = if is_dir {
+            self.filter.dir_exclusions(rel)
+        } else {
+            self.filter.file_exclusions(rel)
+        };
+
+        // Explorer-only: oversized single files. The structure walker checks
+        // the same cap during its scan (outside the shared filter).
+        if !is_dir
+            && let Ok(metadata) = std::fs::metadata(path)
+            && metadata.len() > self.config.max_file_size
+        {
+            exclusions.push(Exclusion::new(
+                ExclusionKind::Oversize,
+                format!(
+                    "{} bytes exceeds max_file_size {}",
+                    metadata.len(),
+                    self.config.max_file_size
+                ),
+            ));
+        }
+
+        exclusions
+    }
+
     fn is_ignored(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy().to_lowercase();
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        // Check excluded directories
-        for excluded_dir in &self.config.excluded_dirs {
-            if path_str.contains(&excluded_dir.to_lowercase()) {
-                return true;
-            }
-        }
-
-        // Check excluded files
-        for excluded_file in &self.config.excluded_files {
-            if excluded_file.contains('*') {
-                // Simple wildcard matching
-                let pattern = excluded_file.replace('*', "");
-                if file_name.contains(&pattern.to_lowercase()) {
-                    return true;
-                }
-            } else if file_name == excluded_file.to_lowercase() {
-                return true;
-            }
-        }
-
-        // Check excluded extensions
-        if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-            if self
-                .config
-                .excluded_extensions
-                .contains(&extension.to_lowercase())
-            {
-                return true;
-            }
-        }
-
-        // Check included extensions (if specified)
-        if !self.config.included_extensions.is_empty() {
-            if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-                if !self
-                    .config
-                    .included_extensions
-                    .contains(&extension.to_lowercase())
-                {
-                    return true;
-                }
-            } else {
-                return true; // No extension and included list is specified
-            }
-        }
-
-        // Check test files (if not including test files)
-        if !self.config.include_tests && is_test_file(path) {
-            return true;
-        }
-
-        // Check hidden files
-        if !self.config.include_hidden && file_name.starts_with('.') {
-            return true;
-        }
-
-        // Check file size
-        if let Ok(metadata) = std::fs::metadata(path) {
-            if metadata.len() > self.config.max_file_size {
-                return true;
-            }
-        }
-
-        false
+        !self.exclusions_for(path).is_empty()
     }
 
     fn create_file_info(&self, path: &Path) -> Result<FileInfo> {

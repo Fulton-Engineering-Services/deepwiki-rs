@@ -15,8 +15,8 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Project path
-    #[arg(short, long, default_value = ".")]
+    /// Project path (available before or after subcommands)
+    #[arg(short, long, default_value = ".", global = true)]
     pub project_path: PathBuf,
 
     /// Output path
@@ -136,6 +136,21 @@ pub enum Commands {
         /// Force sync even if cache is fresh
         #[arg(long)]
         force: bool,
+    },
+
+    /// Explain why a path is included in or excluded from analysis
+    ///
+    /// Evaluates the same rules the structure walker and the LLM
+    /// file-explorer use (excluded_dirs / excluded_files / extensions,
+    /// hidden, test, binary, size, git) against a project-relative path and
+    /// prints every rule that fires, then a verdict.
+    Explain {
+        /// Path to explain (relative to the project root, or absolute inside it)
+        path: PathBuf,
+
+        /// Configuration file path
+        #[arg(short, long)]
+        config: Option<PathBuf>,
     },
 }
 

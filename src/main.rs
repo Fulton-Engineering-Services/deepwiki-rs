@@ -5,6 +5,7 @@ use clap::Parser;
 mod cache;
 mod cli;
 mod config;
+mod explain;
 mod generator;
 mod i18n;
 mod integrations;
@@ -15,11 +16,11 @@ mod utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = cli::Args::parse();
+    let mut args = cli::Args::parse();
 
-    // Handle subcommands
-    if let Some(command) = args.command {
-        return handle_subcommand(command, args.config).await;
+    // Handle subcommands (take() so the remaining args stay borrowable)
+    if let Some(command) = args.command.take() {
+        return handle_subcommand(command, &args).await;
     }
 
     // Default: run documentation generation
@@ -28,10 +29,15 @@ async fn main() -> Result<()> {
 }
 
 /// Handle CLI subcommands
-async fn handle_subcommand(command: cli::Commands, config_path: Option<std::path::PathBuf>) -> Result<()> {
+async fn handle_subcommand(command: cli::Commands, args: &cli::Args) -> Result<()> {
     match command {
         cli::Commands::SyncKnowledge { config, force } => {
-            sync_knowledge(config.or(config_path), force).await
+            let config_path = config.or_else(|| args.config.clone());
+            sync_knowledge(config_path, force).await
+        }
+        cli::Commands::Explain { path, config } => {
+            let config_path = config.or_else(|| args.config.clone());
+            explain::run(args, &path, config_path)
         }
     }
 }

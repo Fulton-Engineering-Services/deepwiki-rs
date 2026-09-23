@@ -508,6 +508,10 @@ deepwiki-rs -p ./src --model-efficient GPT-5-mini --model-poweruful GPT-5-Pro --
 # (auto-enabled when directory dossiers exceed macro_scan.dossier_threshold, default 150)
 deepwiki-rs -p ./monorepo --macro-scan    # force area-based hierarchical scan
 deepwiki-rs -p ./monorepo --no-macro-scan # force the flat single-pass pipeline
+
+# Debug the exclusion config: show every rule that fires for a path and a verdict
+deepwiki-rs explain src/main.rs
+deepwiki-rs explain -p .litho/tree/repo ui/api-types/src/generated/api.ts
 ```
 
 ## 📚 External Knowledge Integration

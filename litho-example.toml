@@ -46,7 +46,13 @@ target_language = "en"
 # Set to false to include untracked files
 # git_tracked_only = true
 
-# Directories to exclude from analysis
+# Directories to exclude from analysis.
+# Matching (shared by the structure walker, the LLM file-explorer, and
+# `deepwiki-rs explain`): entries without "/" match any single path
+# component (basename, case-insensitive; globs with * ? [ ] supported);
+# entries containing "/" are root-anchored path patterns
+# (e.g. "ui/api-types/src/generated", "docs/**/*.md", "**/generated").
+# These arrays REPLACE the built-in defaults entirely.
 excluded_dirs = [
     ".litho",
     "litho.docs",
@@ -69,7 +75,9 @@ excluded_dirs = [
     "__fixtures__"
 ]
 
-# Specific files to exclude
+# Specific files to exclude. Same matching rules as excluded_dirs:
+# basename globs for entries without "/" ("*.min.js"), root-anchored path
+# patterns for entries with "/" ("docs/**/*.md").
 excluded_files = [
     "litho.toml",
     "*.litho",

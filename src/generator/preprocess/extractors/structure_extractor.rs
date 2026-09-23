@@ -2,25 +2,30 @@ use crate::generator::context::GeneratorContext;
 use crate::generator::preprocess::agents::directory_scoring::DirectoryScorer;
 use crate::types::project_structure::ProjectStructure;
 use crate::types::{DirectoryInfo, FileInfo};
-use crate::utils::file_utils::{is_binary_file_path, is_test_directory, is_test_file};
+use crate::utils::exclusion::{Exclusion, ExclusionFilter, ExclusionKind};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Project structure extractor
 pub struct StructureExtractor {
     directory_scorer: DirectoryScorer,
     context: GeneratorContext,
+    /// Shared exclusion rules — the same filter the LLM file-explorer tool
+    /// and the `explain` subcommand use (see `utils::exclusion`).
+    filter: ExclusionFilter,
 }
 
 impl StructureExtractor {
     pub fn new(context: GeneratorContext) -> Self {
+        let filter = ExclusionFilter::new(&context.config);
         Self {
             directory_scorer: DirectoryScorer::new(),
             context,
+            filter,
         }
     }
 
@@ -76,10 +81,16 @@ impl StructureExtractor {
 
         // Sort files by importance score
         files.sort_by(|a, b| {
-            b.importance_score.partial_cmp(&a.importance_score).unwrap_or(std::cmp::Ordering::Equal)
+            b.importance_score
+                .partial_cmp(&a.importance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         // Apply LLM directory scoring boost to all directories
-        match self.directory_scorer.score_directories(&self.context, &directories).await {
+        match self
+            .directory_scorer
+            .score_directories(&self.context, &directories)
+            .await
+        {
             Ok(dir_scores) => {
                 self.apply_directory_score_boost(&mut files, &dir_scores, project_path);
             }
@@ -130,7 +141,9 @@ impl StructureExtractor {
 
         // Warn if git_tracked_only is enabled but no files were found
         if self.context.config.git_tracked_only && tracked.is_empty() {
-            eprintln!("⚠️  Warning: git_tracked_only is enabled but no tracked files were found. Check that this is a git repository.");
+            eprintln!(
+                "⚠️  Warning: git_tracked_only is enabled but no tracked files were found. Check that this is a git repository."
+            );
         }
 
         tracked
@@ -170,8 +183,10 @@ impl StructureExtractor {
                             continue;
                         }
                         // Check if this file should be ignored
-                        if !self.should_ignore_file(&path, tracked_files) {
-                            let mut file_info = self.create_file_info(&path, root_path, &metadata)?;
+                        let rel_path = path.strip_prefix(root_path).unwrap_or(&path);
+                        if !self.should_ignore_file(rel_path, &path, tracked_files) {
+                            let mut file_info =
+                                self.create_file_info(&path, root_path, &metadata)?;
 
                             // Calculate importance score during scan (lazy calculation)
                             self.calculate_file_importance_score(&mut file_info);
@@ -191,14 +206,11 @@ impl StructureExtractor {
                         }
                     }
                 } else if file_type.is_dir() {
-                    let dir_name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-
-                    // Skip hidden directories and commonly ignored directories
-                    if !self.should_ignore_directory(&dir_name) {
+                    // Skip excluded, hidden, and test directories. Ancestors
+                    // were already accepted (we only reach here by descending
+                    // through them), so only this component needs checking.
+                    let rel_dir = path.strip_prefix(root_path).unwrap_or(&path);
+                    if self.filter.dir_component_exclusions(rel_dir).is_empty() {
                         dir_subdirectory_count += 1;
 
                         // Recursively scan subdirectories
@@ -313,8 +325,8 @@ impl StructureExtractor {
         if let Some(ref ext) = file.extension {
             match ext.as_str() {
                 // Backend/Core languages - highest priority
-                "rs" | "py" | "java" | "kt" | "cpp" | "c" | "go" | "rb" | "php" | "m"
-                | "swift" | "dart" | "cs" => score += 0.4,
+                "rs" | "py" | "java" | "kt" | "cpp" | "c" | "go" | "rb" | "php" | "m" | "swift"
+                | "dart" | "cs" => score += 0.4,
                 // SQL and database files
                 "sql" | "sqlproj" => score += 0.3,
                 // Frontend frameworks (React/Vue/Svelte) - medium priority
@@ -340,105 +352,41 @@ impl StructureExtractor {
         }
 
         // Bonus for database-related paths
-        if path_str.contains("database") || path_str.contains("schema") || path_str.contains("migrations") {
+        if path_str.contains("database")
+            || path_str.contains("schema")
+            || path_str.contains("migrations")
+        {
             score += 0.15;
         }
 
         file.importance_score = score.min(1.0);
     }
 
-    fn should_ignore_directory(&self, dir_name: &str) -> bool {
-        let config = &self.context.config;
-        let dir_name_lower = dir_name.to_lowercase();
+    fn should_ignore_file(
+        &self,
+        rel_path: &Path,
+        abs_path: &Path,
+        tracked_files: &HashMap<PathBuf, ()>,
+    ) -> bool {
+        // Config rules (patterns, extensions, test/hidden/binary) come from
+        // the shared filter; the git gate is structure-walker-only because
+        // it needs the tracked-file set gathered during extraction.
+        let mut exclusions = self.filter.file_exclusions(rel_path);
 
-        // Check excluded directories configured in Config
-        for excluded_dir in &config.excluded_dirs {
-            if dir_name_lower == excluded_dir.to_lowercase() {
-                return true;
-            }
+        if self.context.config.git_tracked_only
+            && !tracked_files.is_empty()
+            && !tracked_files.contains_key(abs_path)
+        {
+            exclusions.push(Exclusion::new(
+                ExclusionKind::Untracked,
+                format!(
+                    "\"{}\" is not tracked by git (git_tracked_only = true)",
+                    rel_path.display()
+                ),
+            ));
         }
 
-        // Check if it's a test directory (if not including test files)
-        if !config.include_tests && is_test_directory(dir_name) {
-            return true;
-        }
-
-        // Check hidden directories
-        if !config.include_hidden && dir_name.starts_with('.') {
-            return true;
-        }
-
-        false
-    }
-
-    fn should_ignore_file(&self, path: &PathBuf, tracked_files: &HashMap<PathBuf, ()>) -> bool {
-        let config = &self.context.config;
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        let _path_str = path.to_string_lossy().to_lowercase();
-
-        // Check excluded files
-        for excluded_file in &config.excluded_files {
-            if excluded_file.contains('*') {
-                // Simple wildcard matching
-                let pattern = excluded_file.replace('*', "");
-                if file_name.contains(&pattern.to_lowercase()) {
-                    return true;
-                }
-            } else if file_name == excluded_file.to_lowercase() {
-                return true;
-            }
-        }
-
-        // Check excluded extensions
-        if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-            if config
-                .excluded_extensions
-                .contains(&extension.to_lowercase())
-            {
-                return true;
-            }
-        }
-
-        // Check included extensions (if specified)
-        if !config.included_extensions.is_empty() {
-            if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-                if !config
-                    .included_extensions
-                    .contains(&extension.to_lowercase())
-                {
-                    return true;
-                }
-            } else {
-                return true; // No extension and include list is specified
-            }
-        }
-
-        // Check test files (if not including test files)
-        if !config.include_tests && is_test_file(path) {
-            return true;
-        }
-
-        // Check hidden files
-        if !config.include_hidden && file_name.starts_with('.') {
-            return true;
-        }
-
-        // Check git tracked files (if git_tracked_only is true)
-        if config.git_tracked_only && !tracked_files.is_empty() && !tracked_files.contains_key(path) {
-            return true;
-        }
-
-        // Check binary files
-        if is_binary_file_path(path) {
-            return true;
-        }
-
-        false
+        !exclusions.is_empty()
     }
 
     fn calculate_importance_scores(
