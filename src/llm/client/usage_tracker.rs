@@ -420,18 +420,17 @@ pub fn render_markdown_report(report: &ExecutionUsageReport) -> String {
             .collect();
         if !litellm_meta.is_empty() {
             s.push_str("## LiteLLM Metadata\n\n");
-            s.push_str("| Call ID | Model ID | Model Name | API Base | Resp ms | Overhead ms | Key Spend |\n");
-            s.push_str("|---|---|---|---|---|---|---|\n");
+            s.push_str("| Call ID | Model ID | Model Name | API Base | Resp ms | Overhead ms |\n");
+            s.push_str("|---|---|---|---|---|---|\n");
             for c in &litellm_meta {
                 s.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} |\n",
                     c.litellm_call_id.as_deref().unwrap_or("-"),
                     c.litellm_model_id.as_deref().unwrap_or("-"),
                     c.litellm_model_name.as_deref().unwrap_or("-"),
                     c.litellm_model_api_base.as_deref().unwrap_or("-"),
                     opt_u64(&c.litellm_response_duration_ms),
                     opt_u64(&c.litellm_overhead_duration_ms),
-                    c.litellm_key_spend.map(|v| format!("${:.4}", v)).unwrap_or_else(|| "-".into()),
                 ));
             }
             s.push('\n');
