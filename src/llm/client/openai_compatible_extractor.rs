@@ -25,6 +25,8 @@ pub struct OpenAICompatibleExtractorWrapper<T> {
     model: String,
     api_key: String,
     stream: bool,
+    max_tokens: u32,
+    temperature: Option<f64>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -33,6 +35,9 @@ where
     T: JsonSchema + Serialize + for<'de> Deserialize<'de>,
 {
     /// Create a new OpenAI-compatible extractor with configuration
+    // Mirrors the rig agent's request knobs; the argument list tracks
+    // config fields, same as ProviderAgent::prompt_via_http.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
         max_retries: u32,
@@ -40,6 +45,8 @@ where
         model: String,
         api_key: String,
         stream: bool,
+        max_tokens: u32,
+        temperature: Option<f64>,
     ) -> Self {
         Self {
             agent,
@@ -48,6 +55,8 @@ where
             model,
             api_key,
             stream,
+            max_tokens,
+            temperature,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -125,7 +134,10 @@ where
             reqwest::Client::new()
         };
 
-        // Build OpenAI-compatible request
+        // Build OpenAI-compatible request. max_tokens / temperature mirror the
+        // rig agent's config instead of hardcoded values (previously 4096 /
+        // 0.7, which silently truncated long structured extractions on the
+        // fallback path).
         let mut request_body = serde_json::json!({
             "model": self.model,
             "messages": [
@@ -134,8 +146,8 @@ where
                     "content": prompt
                 }
             ],
-            "temperature": 0.7,
-            "max_tokens": 4096
+            "temperature": self.temperature.unwrap_or(0.7),
+            "max_tokens": self.max_tokens
         });
         if self.stream {
             request_body["stream"] = serde_json::json!(true);

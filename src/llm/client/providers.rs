@@ -488,6 +488,8 @@ impl ProviderClient {
                     model.to_string(),
                     config.api_key.clone(),
                     config.stream_enabled(),
+                    config.max_tokens,
+                    config.temperature,
                 );
 
                 ProviderExtractor::OpenAI(wrapper)
