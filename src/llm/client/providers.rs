@@ -21,11 +21,15 @@ use crate::{
 use super::ollama_extractor::OllamaExtractorWrapper;
 use super::openai_compatible_extractor::OpenAICompatibleExtractorWrapper;
 use super::streaming::{collect_openai_sse, drain_to_string, with_spinner};
+use super::usage_capture::{
+    take_captures_for_current_task, CapturingClient, OpenAIModel,
+};
+use super::usage_tracker;
 
 /// Unified Provider client enum
 #[derive(Clone)]
 pub enum ProviderClient {
-    OpenAI(rig_core::providers::openai::CompletionsClient),
+    OpenAI(rig_core::providers::openai::CompletionsClient<CapturingClient>),
     Moonshot(rig_core::providers::moonshot::Client),
     DeepSeek(rig_core::providers::deepseek::Client),
     Mistral(rig_core::providers::mistral::Client),
@@ -40,14 +44,19 @@ impl ProviderClient {
     pub fn new(config: &LLMConfig) -> Result<Self> {
         match config.provider {
             LLMProvider::OpenAI => {
+                let http = CapturingClient::new(rig_core::http_client::ReqwestClient::default());
                 let client = if config.api_base_url != "https://api.openai.com/v1" {
                     rig_core::providers::openai::Client::builder()
                         .api_key(&config.api_key)
                         .base_url(&config.api_base_url)
+                        .http_client(http)
                         .build()?
                         .completions_api()
                 } else {
-                    rig_core::providers::openai::Client::new(&config.api_key)?
+                    rig_core::providers::openai::Client::builder()
+                        .api_key(&config.api_key)
+                        .http_client(http)
+                        .build()?
                         .completions_api()
                 };
                 Ok(ProviderClient::OpenAI(client))
@@ -578,7 +587,7 @@ impl ProviderClient {
 /// Unified Agent enum
 pub enum ProviderAgent {
     OpenAI {
-        agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
+        agent: Agent<OpenAIModel>,
         base_url: String,
         model: String,
         api_key: String,
@@ -611,6 +620,10 @@ impl ProviderAgent {
     /// Execute prompt with HTTP fallback for OpenAI-compatible providers
     pub async fn prompt(&self, prompt: &str, concurrency: usize) -> Result<String> {
         let concurrency = concurrency.max(1);
+        // Discard any stale captures from an uncovered caller so the sink
+        // cannot grow unbounded; the real drain happens at the funnel.
+        let _ = take_captures_for_current_task();
+        let _ = usage_tracker::UsageTracker::global();
         match self {
             ProviderAgent::OpenAI { agent, base_url, model, api_key, system_prompt, max_tokens, temperature, stream } => {
                 // Try rig agent first (streaming when enabled) with concurrency
@@ -788,9 +801,32 @@ impl ProviderAgent {
         }
 
         with_spinner(model, "reading response", async {
-            let json: serde_json::Value = response
-                .json()
+            let status = response.status();
+            let headers: Vec<(String, String)> = response
+                .headers()
+                .iter()
+                .map(|(k, v)| {
+                    (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                })
+                .collect();
+            let body_text = response
+                .text()
                 .await
+                .map_err(|e| anyhow::anyhow!("Failed to read HTTP response: {}", e))?;
+            crate::llm::client::usage_capture::capture_response(
+                crate::llm::client::usage_capture::CapturedResponse {
+                    request_url: format!(
+                        "{}/chat/completions",
+                        base_url.trim_end_matches('/')
+                    ),
+                    request_model: Some(model.to_string()),
+                    status: status.as_u16(),
+                    headers,
+                    body: body_text.clone(),
+                    stream: false,
+                },
+            );
+            let json: serde_json::Value = serde_json::from_str(&body_text)
                 .map_err(|e| anyhow::anyhow!("Failed to parse HTTP response: {}", e))?;
 
             let content = json

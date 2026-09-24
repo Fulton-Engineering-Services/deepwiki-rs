@@ -175,6 +175,22 @@ max_tokens = 4096
 # Temperature for LLM responses (0.0 = deterministic, 1.0 = creative)
 temperature = 0.1
 
+# Cost & usage tracking (default: false).
+# When true, Litho captures the raw LiteLLM/OpenAI-compatible response
+# (usage + cost in the body, and x-litellm-* headers), shows a per-call
+# cost/usage line in the live progress output, writes per-execution records
+# to .litho/cost_usage/ (JSON + append-only calls.jsonl), and emits a
+# markdown report to <output_path>/__Litho_Cost_Usage_Report__.md.
+# cost_and_usage = false
+
+# Optional per-model pricing (USD per 1K tokens) used to estimate cost when
+# the provider does not report it. Keys are model names as sent on the wire.
+# [llm.pricing_table."gpt-4o-mini"]
+# input_per_1k = 0.00015
+# output_per_1k = 0.0006
+# cache_read_per_1k = 0.000075
+# cache_creation_per_1k = 0.00015
+
 # Number of retry attempts for failed requests
 retry_attempts = 5
 

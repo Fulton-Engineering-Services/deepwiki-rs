@@ -10,7 +10,8 @@ repository = "https://github.com/sopaco/deepwiki-rs"
 [dependencies]
 # rig（自 v0.40 起原生支持 StreamingPromptRequest::tool_concurrency，
 # 即流式路径的并行工具执行；此前为本地 fork 补丁，已随 fork 归档移除）
-rig-core = "0.40"
+rig-core = { version = "0.40", features = ["reqwest-middleware"] }
+reqwest-middleware = "0.5"
 
 # 网络
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -49,6 +50,9 @@ md-5 = "0.10"
 
 # Base64 encoding
 base64 = "0.22"
+
+# Raw bytes for HTTP response capture
+bytes = "1"
 
 # PDF parsing
 pdf-extract = "0.7"

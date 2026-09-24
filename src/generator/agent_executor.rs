@@ -46,14 +46,28 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
         .replacen("{}", log_tag, 1);
     println!("{}", msg);
 
+    let started = std::time::Instant::now();
     let reply = context
         .llm_client
         .prompt_without_react(prompt_sys, prompt_user)
         .await
         .map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
 
-    // Estimate token usage
     let input_text = format!("{} {}", prompt_sys, prompt_user);
+    crate::llm::client::usage_tracker::record_from_captures(
+        &context.config.llm,
+        "",
+        &context.config.llm.provider.to_string(),
+        Some(log_tag.clone()),
+        started.elapsed().as_millis() as u64,
+        context.config.llm.stream_enabled(),
+        input_text.chars().count(),
+        reply.chars().count(),
+        true,
+        None,
+    );
+
+    // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &reply);
 
     // Cache result - Use method with token information.
@@ -104,15 +118,29 @@ pub async fn prompt_with_tools(
         .replacen("{}", log_tag, 1);
     println!("{}", msg);
 
+    let started = std::time::Instant::now();
     let reply = context
         .llm_client
         .prompt(prompt_sys, prompt_user)
         .await
         .map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
 
-    // Estimate token usage
     let input_text = format!("{} {}", prompt_sys, prompt_user);
     let output_text = serde_json::to_string(&reply).unwrap_or_default();
+    crate::llm::client::usage_tracker::record_from_captures(
+        &context.config.llm,
+        "",
+        &context.config.llm.provider.to_string(),
+        Some(log_tag.clone()),
+        started.elapsed().as_millis() as u64,
+        context.config.llm.stream_enabled(),
+        input_text.chars().count(),
+        output_text.chars().count(),
+        true,
+        None,
+    );
+
+    // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &output_text);
 
     // Cache result - Use method with token information
@@ -157,15 +185,29 @@ where
         .replacen("{}", log_tag, 1);
     println!("{}", msg);
 
+    let started = std::time::Instant::now();
     let reply = context
         .llm_client
         .extract::<T>(prompt_sys, prompt_user)
         .await
         .map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
 
-    // Estimate token usage
     let input_text = format!("{} {}", prompt_sys, prompt_user);
     let output_text = serde_json::to_string(&reply).unwrap_or_default();
+    crate::llm::client::usage_tracker::record_from_captures(
+        &context.config.llm,
+        "",
+        &context.config.llm.provider.to_string(),
+        Some(log_tag.clone()),
+        started.elapsed().as_millis() as u64,
+        context.config.llm.stream_enabled(),
+        input_text.chars().count(),
+        output_text.chars().count(),
+        true,
+        None,
+    );
+
+    // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &output_text);
 
     // Cache result - Use method with token information

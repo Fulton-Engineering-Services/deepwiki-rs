@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::sync::LazyLock;
 
 use super::streaming::{collect_openai_sse, drain_to_string, with_spinner};
+use super::usage_capture::OpenAIModel;
 
 /// JSON code block regex pattern
 static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
@@ -19,7 +20,7 @@ static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
 
 /// OpenAI-compatible structured output extractor with HTTP fallback
 pub struct OpenAICompatibleExtractorWrapper<T> {
-    agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
+    agent: Agent<OpenAIModel>,
     max_retries: u32,
     base_url: String,
     model: String,
@@ -39,7 +40,7 @@ where
     // config fields, same as ProviderAgent::prompt_via_http.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
+        agent: Agent<OpenAIModel>,
         max_retries: u32,
         base_url: String,
         model: String,

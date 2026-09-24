@@ -17,6 +17,8 @@ mod react_executor;
 mod streaming;
 mod summary_reasoner;
 pub mod types;
+pub mod usage_capture;
+pub mod usage_tracker;
 pub mod utils;
 
 pub use react::{ReActConfig, ReActResponse};

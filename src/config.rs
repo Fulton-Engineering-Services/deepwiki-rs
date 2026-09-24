@@ -223,6 +223,37 @@ pub struct LLMConfig {
     /// is ever parsed.
     #[serde(default)]
     pub stream: Option<bool>,
+
+    /// Enable cost and usage tracking. When true, the LiteLLM response
+    /// (usage/cost in body + x-litellm-* headers) is captured via an HTTP
+    /// middleware, surfaced in the live progress UX, persisted to
+    /// `.litho/cost_usage/`, and summarized in a markdown report in the
+    /// docs output folder. Default: false.
+    #[serde(default)]
+    pub cost_and_usage: bool,
+
+    /// Optional per-model pricing table (USD per 1K tokens) used to estimate
+    /// cost when LiteLLM-reported cost is unavailable. Keys are model names.
+    #[serde(default)]
+    pub pricing_table: std::collections::HashMap<String, ModelPricing>,
+}
+
+/// Per-model pricing used for cost estimation when the provider does not
+/// report cost directly.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ModelPricing {
+    /// USD per 1K input (prompt) tokens
+    #[serde(default)]
+    pub input_per_1k: f64,
+    /// USD per 1K output (completion) tokens
+    #[serde(default)]
+    pub output_per_1k: f64,
+    /// USD per 1K cache-read tokens (defaults to input rate if omitted)
+    #[serde(default)]
+    pub cache_read_per_1k: f64,
+    /// USD per 1K cache-creation tokens (defaults to input rate if omitted)
+    #[serde(default)]
+    pub cache_creation_per_1k: f64,
 }
 
 fn default_max_turns() -> usize {
@@ -810,6 +841,8 @@ impl Default for LLMConfig {
             max_turns: 100,
             tool_concurrency: 4,
             stream: None,
+            cost_and_usage: false,
+            pricing_table: std::collections::HashMap::new(),
         }
     }
 }

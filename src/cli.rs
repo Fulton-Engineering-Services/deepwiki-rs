@@ -122,6 +122,11 @@ pub struct Args {
     /// Disable hierarchical macro-scan
     #[arg(long)]
     pub no_macro_scan: bool,
+
+    /// Enable cost and usage tracking (captures LiteLLM usage/cost, writes
+    /// .litho/cost_usage/ records and a markdown report to the docs output)
+    #[arg(long)]
+    pub cost_and_usage: bool,
 }
 
 /// CLI subcommands
@@ -291,6 +296,11 @@ impl Args {
         }
         if self.no_macro_scan {
             config.macro_scan.enabled = Some(false);
+        }
+
+        // Cost and usage tracking override (CLI flag forces it on)
+        if self.cost_and_usage {
+            config.llm.cost_and_usage = true;
         }
 
         // Workflow stage flags

@@ -88,6 +88,21 @@ pub async fn launch(c: &Config) -> Result<()> {
         memory,
     };
 
+    if context.config.llm.cost_and_usage {
+        let execution_id = format!(
+            "{}_{}",
+            chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        crate::llm::client::usage_tracker::UsageTracker::global().begin_execution(
+            execution_id,
+            context.config.get_project_name(),
+            context.config.llm.api_base_url.clone(),
+            context.config.llm.provider.to_string(),
+        );
+        println!("💰 Cost & usage tracking enabled");
+    }
+
     // Sync external knowledge if configured
     if let Ok(syncer) = crate::integrations::KnowledgeSyncer::new(context.config.clone()) {
         if syncer.should_sync().unwrap_or(false) {
@@ -172,6 +187,35 @@ pub async fn launch(c: &Config) -> Result<()> {
     context
         .store_to_memory(TimingScope::TIMING, TimingKeys::TOTAL_EXECUTION, total_time)
         .await?;
+
+    // Emit cost & usage artifacts when tracking is enabled.
+    if context.config.llm.cost_and_usage
+        && let Some(report) =
+            crate::llm::client::usage_tracker::UsageTracker::global().build_report()
+    {
+        if let Err(e) =
+            crate::llm::client::usage_tracker::persist(&context.config.internal_path, &report)
+        {
+            eprintln!("⚠️  Warning: failed to persist cost/usage records: {}", e);
+        }
+        let markdown = crate::llm::client::usage_tracker::render_markdown_report(&report);
+        let out_path = context
+            .config
+            .output_path
+            .join("__Litho_Cost_Usage_Report__.md");
+        if let Some(parent) = out_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&out_path, markdown) {
+            Ok(()) => println!(
+                "💰 Cost & usage report: {} (total ${:.4}, {} calls)",
+                out_path.display(),
+                report.total_cost_usd,
+                report.calls.len()
+            ),
+            Err(e) => eprintln!("⚠️  Warning: failed to write cost/usage report: {}", e),
+        }
+    }
 
     println!("\n🎉 All processes execution completed! Total duration: {:.2}s", total_time);
 
