@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
 
-use super::streaming::{collect_openai_sse, drain_to_string};
+use super::streaming::{collect_openai_sse, drain_to_string, with_spinner};
 
 /// JSON code block regex pattern
 static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
@@ -112,10 +112,11 @@ where
                 .await
                 .context("Failed to get response via rig")?
         } else {
-            self.agent
-                .prompt(prompt)
-                .await
-                .context("Failed to get response via rig")?
+            with_spinner(&self.model, "calling", async {
+                self.agent.prompt(prompt).await
+            })
+            .await
+            .context("Failed to get response via rig")?
         };
 
         self.parse_and_validate(&response, attempt)
@@ -177,19 +178,22 @@ where
         let response_text = if self.stream {
             collect_openai_sse(response, &self.model).await?
         } else {
-            let json: Value = response
-                .json()
-                .await
-                .context("Failed to parse OpenAI-compatible API HTTP response")?;
+            with_spinner(&self.model, "reading response", async {
+                let json: Value = response
+                    .json()
+                    .await
+                    .context("Failed to parse OpenAI-compatible API HTTP response")?;
 
-            // Extract content from OpenAI response format
-            json.get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("message"))
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Invalid OpenAI API response format"))?
-                .to_string()
+                // Extract content from OpenAI response format
+                json.get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid OpenAI API response format"))
+                    .map(str::to_string)
+            })
+            .await?
         };
 
         self.parse_and_validate(&response_text, attempt)

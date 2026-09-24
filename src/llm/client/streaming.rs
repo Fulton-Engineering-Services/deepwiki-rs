@@ -2,101 +2,89 @@
 //!
 //! Drains rig streaming responses into a complete string — deltas are
 //! accumulated, JSON is only ever parsed from the finished text — while
-//! reporting throttled progress on stderr. Also parses OpenAI-compatible SSE
-//! chunks for the reqwest HTTP fallback path.
+//! reporting live progress on stderr via `indicatif`. Also parses
+//! OpenAI-compatible SSE chunks for the reqwest HTTP fallback path.
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rig_core::agent::{MultiTurnStreamItem, StreamingResult};
-use rig_core::streaming::StreamedAssistantContent;
+use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
 use serde_json::Value;
-use std::io::{IsTerminal, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::sync::LazyLock;
+use std::time::Duration;
 
-/// Minimum interval between stderr progress renders.
-const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+/// Shared `MultiProgress` manager so concurrent provider calls each get their
+/// own stderr line without overwriting one another.
+static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
 
-/// Number of streaming requests currently rendering progress. With more than
-/// one live stream (e.g. `max_parallels > 1`), in-place carriage-return
-/// updates would overwrite each other, so concurrent streams fall back to
-/// plain periodic lines.
-static ACTIVE_STREAMS: AtomicUsize = AtomicUsize::new(0);
+/// Rough character-to-token ratio used for live tok/s estimates.
+const CHARS_PER_TOKEN: usize = 4;
 
-/// Throttled stderr progress reporter for a single streaming request.
+/// Live stderr progress reporter for a single request.
 ///
-/// Renders at most one line per [`PROGRESS_INTERVAL`]: an in-place
-/// carriage-return update on a TTY when this is the only live stream (plain
-/// periodic lines otherwise), and clears the line when the request completes
-/// or fails.
+/// Renders a spinner plus a status message on every delta, giving real-time
+/// tok/s and internal state (tool calls, reasoning, etc.). The bar is cleared
+/// when the request finishes or fails.
 pub struct StreamProgress {
+    bar: ProgressBar,
     label: String,
-    start: Instant,
-    last_render: Instant,
-    chars: usize,
-    out_is_tty: bool,
-    rendered: bool,
 }
 
 impl StreamProgress {
-    pub fn new(label: &str) -> Self {
-        ACTIVE_STREAMS.fetch_add(1, Ordering::SeqCst);
+    /// Create a new progress reporter.
+    ///
+    /// `label` is usually the model name; `status` is the initial human-readable
+    /// state (e.g. "streaming" or "calling").
+    pub fn new(label: &str, status: &str) -> Self {
+        let bar = MULTI_PROGRESS.add(ProgressBar::new_spinner());
+        bar.set_style(
+            ProgressStyle::default_spinner()
+                .template(
+                    "{spinner:.green} {msg} · {pos} tok · {per_sec:.1} tok/s · {elapsed_precise}",
+                )
+                .expect("valid progress template"),
+        );
+        bar.set_message(format!("{label} · {status}"));
+        bar.enable_steady_tick(Duration::from_millis(120));
         Self {
+            bar,
             label: label.to_string(),
-            start: Instant::now(),
-            last_render: Instant::now(),
-            chars: 0,
-            out_is_tty: std::io::stderr().is_terminal(),
-            rendered: false,
         }
     }
 
-    /// Record more streamed characters; render if the throttle interval elapsed.
-    pub fn advance(&mut self, chars: usize) {
-        self.chars += chars;
-        let now = Instant::now();
-        if now.duration_since(self.last_render) < PROGRESS_INTERVAL {
-            return;
-        }
-        self.last_render = now;
-        let line = self.format_line(now);
-        if self.out_is_tty && ACTIVE_STREAMS.load(Ordering::SeqCst) == 1 {
-            eprint!("\r\x1b[2K{line}");
-            let _ = std::io::stderr().flush();
-            self.rendered = true;
-        } else {
-            eprintln!("{line}");
-        }
+    /// Record more streamed characters; updates the bar immediately.
+    /// `indicatif` throttles actual terminal draws internally, so we can call
+    /// this on every delta without overwhelming stderr.
+    pub fn advance(&self, chars: usize) {
+        self.bar.inc((chars / CHARS_PER_TOKEN).max(1) as u64);
     }
 
-    /// Clear the rendered line (TTY only) so it doesn't collide with
-    /// subsequent status output.
-    pub fn finish(&mut self) {
-        if self.rendered {
-            eprint!("\r\x1b[2K");
-            let _ = std::io::stderr().flush();
-        }
-        self.rendered = false;
+    /// Update the status portion of the progress line (e.g. "tool: file_reader").
+    pub fn set_status(&self, status: &str) {
+        self.bar.set_message(format!("{} · {}", self.label, status));
     }
 
-    fn format_line(&self, now: Instant) -> String {
-        let elapsed = now.duration_since(self.start).as_secs_f64().max(0.001);
-        // Rough token estimate: ~4 characters per token.
-        let est_tokens = self.chars / 4;
-        format!(
-            "⏳ {} · ~{} tok · {:.1} tok/s · {:.1}s",
-            self.label,
-            est_tokens,
-            est_tokens as f64 / elapsed,
-            elapsed
-        )
+    /// Clear the rendered line so it doesn't collide with subsequent output.
+    pub fn finish(&self) {
+        self.bar.finish_and_clear();
     }
 }
 
-impl Drop for StreamProgress {
-    fn drop(&mut self) {
-        ACTIVE_STREAMS.fetch_sub(1, Ordering::SeqCst);
-    }
+/// Run an async operation with a live spinner that shows `label · status`.
+///
+/// The spinner is cleared as soon as the future resolves, regardless of success
+/// or failure. This gives users feedback during non-streaming provider calls
+/// that would otherwise appear frozen.
+pub async fn with_spinner<T, F>(label: &str, status: &str, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let progress = StreamProgress::new(label, status);
+    let result = fut.await;
+    progress.finish();
+    result
 }
 
 /// Drain a rig streaming prompt into its complete assistant text.
@@ -112,14 +100,14 @@ pub async fn drain_to_string<R>(
     mut stream: StreamingResult<R>,
     label: Option<&str>,
 ) -> Result<String> {
-    let mut progress = label.map(StreamProgress::new);
+    let progress = label.map(|l| StreamProgress::new(l, "streaming"));
     let mut acc = String::new();
     let mut final_text: Option<String> = None;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
-                if let Some(p) = progress.as_mut() {
+                if let Some(p) = progress.as_ref() {
                     p.advance(text.text.chars().count());
                 }
                 acc.push_str(&text.text);
@@ -129,24 +117,58 @@ pub async fn drain_to_string<R>(
             )) => {
                 // Reasoning is not part of the answer but keeps the line alive
                 // during long thinking phases.
-                if let Some(p) = progress.as_mut() {
+                if let Some(p) = progress.as_ref() {
                     p.advance(reasoning.chars().count());
+                    p.set_status("thinking");
                 }
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
                 reasoning,
             ))) => {
-                if let Some(p) = progress.as_mut() {
+                if let Some(p) = progress.as_ref() {
                     p.advance(reasoning.display_text().chars().count());
+                    p.set_status("thinking");
+                }
+            }
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
+                tool_call,
+                ..
+            })) => {
+                if let Some(p) = progress.as_ref() {
+                    p.set_status(&format!("tool: {}", tool_call.function.name));
+                }
+            }
+            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::ToolCallDelta { .. },
+            )) => {
+                // Tool-call argument deltas: keep the spinner alive but don't
+                // count them as answer tokens.
+                if let Some(p) = progress.as_ref() {
+                    p.set_status("tool call");
+                }
+            }
+            Ok(MultiTurnStreamItem::ToolExecutionStart { tool_call, .. }) => {
+                if let Some(p) = progress.as_ref() {
+                    p.set_status(&format!("running {}", tool_call.function.name));
+                }
+            }
+            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { .. })) => {
+                if let Some(p) = progress.as_ref() {
+                    p.set_status("tool result");
+                }
+            }
+            Ok(MultiTurnStreamItem::CompletionCall(_)) => {
+                if let Some(p) = progress.as_ref() {
+                    p.set_status("provider call completed");
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                 final_text = Some(res.output);
             }
-            // Tool calls/results and final model payloads: no progress text.
+            // Unknown / Final assistant content / other provider-native items.
             Ok(_) => {}
             Err(err) => {
-                if let Some(p) = progress.as_mut() {
+                if let Some(p) = progress.as_ref() {
                     p.finish();
                 }
                 // Keep the inner rig error in the anyhow chain so existing
@@ -157,7 +179,7 @@ pub async fn drain_to_string<R>(
         }
     }
 
-    if let Some(p) = progress.as_mut() {
+    if let Some(p) = progress.as_ref() {
         p.finish();
     }
 
@@ -188,14 +210,14 @@ pub fn openai_sse_delta(data: &str) -> Option<String> {
 }
 
 /// Consume an OpenAI-compatible SSE response body into its complete content,
-/// reporting throttled progress under `label`.
+/// reporting live progress under `label`.
 ///
 /// The caller is responsible for the request body (`"stream": true`) and for
 /// checking the HTTP status before calling this.
 pub async fn collect_openai_sse(response: reqwest::Response, label: &str) -> Result<String> {
     use eventsource_stream::Eventsource;
 
-    let mut progress = StreamProgress::new(label);
+    let progress = StreamProgress::new(label, "streaming");
     let mut text = String::new();
     let mut events = response.bytes_stream().eventsource();
 
@@ -249,14 +271,21 @@ mod tests {
     }
 
     #[test]
-    fn progress_line_reports_model_tokens_and_rate() {
-        let mut progress = StreamProgress::new("test-model");
-        progress.start = Instant::now() - Duration::from_secs(2);
-        progress.chars = 800; // 200 est. tokens over 2s => 100 tok/s
-        let line = progress.format_line(progress.start + Duration::from_secs(2));
-        assert!(line.contains("test-model"), "line: {line}");
-        assert!(line.contains("~200 tok"), "line: {line}");
-        assert!(line.contains("100.0 tok/s"), "line: {line}");
+    fn progress_advances_by_estimated_tokens() {
+        let progress = StreamProgress::new("test-model", "streaming");
+        progress.advance(800); // ~200 tokens
+        assert_eq!(progress.bar.position(), 200);
+        progress.finish();
+    }
+
+    #[test]
+    fn progress_status_can_be_updated() {
+        let progress = StreamProgress::new("test-model", "streaming");
+        progress.set_status("tool: file_reader");
+        // We can't easily read the rendered message, but we can verify the bar
+        // is still alive and the method does not panic.
+        assert!(!progress.bar.is_finished());
+        progress.finish();
     }
 
     fn text_item(text: &str) -> MultiTurnStreamItem<()> {

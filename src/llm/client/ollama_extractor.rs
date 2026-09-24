@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
 
-use super::streaming::drain_to_string;
+use super::streaming::{drain_to_string, with_spinner};
 
 /// JSON code block regex pattern
 static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
@@ -99,10 +99,11 @@ where
                 .await
                 .context("Failed to get response from Ollama via rig")?
         } else {
-            self.agent
-                .prompt(prompt)
-                .await
-                .context("Failed to get response from Ollama via rig")?
+            with_spinner(&self.model, "calling", async {
+                self.agent.prompt(prompt).await
+            })
+            .await
+            .context("Failed to get response from Ollama via rig")?
         };
 
         self.parse_and_validate(&response, attempt)
@@ -130,17 +131,20 @@ where
             anyhow::bail!("Ollama HTTP error: {}", response.status());
         }
 
-        let json: Value = response
-            .json()
-            .await
-            .context("Failed to parse Ollama HTTP response")?;
+        let response_text = with_spinner(&self.model, "reading response", async {
+            let json: Value = response
+                .json()
+                .await
+                .context("Failed to parse Ollama HTTP response")?;
 
-        let response_text = json
-            .get("response")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("No 'response' field in Ollama HTTP response"))?;
+            json.get("response")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("No 'response' field in Ollama HTTP response"))
+                .map(str::to_string)
+        })
+        .await?;
 
-        self.parse_and_validate(response_text, attempt)
+        self.parse_and_validate(&response_text, attempt)
     }
 
     /// Parse and validate JSON response

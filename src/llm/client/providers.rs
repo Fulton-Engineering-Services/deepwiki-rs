@@ -20,7 +20,7 @@ use crate::{
 
 use super::ollama_extractor::OllamaExtractorWrapper;
 use super::openai_compatible_extractor::OpenAICompatibleExtractorWrapper;
-use super::streaming::{collect_openai_sse, drain_to_string};
+use super::streaming::{collect_openai_sse, drain_to_string, with_spinner};
 
 /// Unified Provider client enum
 #[derive(Clone)]
@@ -621,11 +621,11 @@ impl ProviderAgent {
                         .await;
                     drain_to_string(stream_items, Some(model)).await
                 } else {
-                    agent
-                        .prompt(prompt)
-                        .tool_concurrency(concurrency)
-                        .await
-                        .map_err(anyhow::Error::from)
+                    with_spinner(model, "calling", async {
+                        agent.prompt(prompt).tool_concurrency(concurrency).await
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
                 };
                 match rig_result {
                     Ok(result) => Ok(result),
@@ -699,11 +699,11 @@ impl ProviderAgent {
                 .await;
             drain_to_string(stream_items, Some(model)).await
         } else {
-            agent
-                .prompt(prompt)
-                .tool_concurrency(concurrency)
-                .await
-                .map_err(|e| e.into())
+            with_spinner(model, "calling", async {
+                agent.prompt(prompt).tool_concurrency(concurrency).await
+            })
+            .await
+            .map_err(|e| e.into())
         }
     }
 
@@ -787,20 +787,23 @@ impl ProviderAgent {
             return collect_openai_sse(response, model).await;
         }
 
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse HTTP response: {}", e))?;
+        with_spinner(model, "reading response", async {
+            let json: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to parse HTTP response: {}", e))?;
 
-        let content = json
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid OpenAI API response format"))?;
+            let content = json
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid OpenAI API response format"))?;
 
-        Ok(content.to_string())
+            Ok(content.to_string())
+        })
+        .await
     }
 }
 
