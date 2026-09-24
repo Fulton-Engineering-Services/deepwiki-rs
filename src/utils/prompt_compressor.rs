@@ -14,8 +14,6 @@ pub struct PromptCompressor {
 /// Compression configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompressionConfig {
-    /// Token threshold that triggers compression
-    pub compression_threshold: usize,
     /// Target compression ratio (0.0-1.0)
     pub target_compression_ratio: f64,
     /// Whether compression is enabled
@@ -44,7 +42,6 @@ pub enum PreservePattern {
 impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
-            compression_threshold: 65536, // Reduced to 64K to prevent token overflow
             target_compression_ratio: 0.5, // More aggressive compression to 50%
             enabled: true,
             preserve_patterns: vec![
@@ -54,6 +51,39 @@ impl Default for CompressionConfig {
                 PreservePattern::InterfaceDefinitions,
             ],
         }
+    }
+}
+
+/// Token count above which content is compressed, derived from the model's
+/// configured context window (`llm.context_length`).
+///
+/// The compression call resends the content and targets ~50% output, so
+/// content above half the window can overflow the compression call itself
+/// (content/2 input + content/4 output = 3/4 window at the trigger point).
+/// The previous hardcoded 64K trigger ignored `llm.context_length`, which
+/// made long-context models compress content that fit comfortably, and let
+/// oversize content slip past small windows uncompressed.
+fn compression_trigger(context_length: usize) -> usize {
+    (context_length / 2).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_is_half_the_configured_window() {
+        assert_eq!(compression_trigger(1_000_000), 500_000);
+        assert_eq!(compression_trigger(150_000), 75_000);
+        assert_eq!(compression_trigger(0), 1);
+    }
+
+    #[test]
+    fn default_compression_config_has_no_static_threshold() {
+        let config = CompressionConfig::default();
+        assert_eq!(config.target_compression_ratio, 0.5);
+        assert!(config.enabled);
+        assert!(config.preserve_patterns.len() == 4);
     }
 }
 
@@ -96,7 +126,7 @@ impl PromptCompressor {
 
         let estimation = self.token_estimator.estimate_tokens(content);
 
-        if estimation.estimated_tokens <= self.compression_config.compression_threshold {
+        if estimation.estimated_tokens <= compression_trigger(context.config.llm.context_length) {
             return Ok(self.create_no_compression_result(content));
         }
 
@@ -160,10 +190,9 @@ impl PromptCompressor {
         content_type: &str,
         original_estimation: TokenEstimation,
     ) -> Result<CompressionResult> {
-        let target_tokens = ((original_estimation.estimated_tokens as f64
+        let target_tokens = (original_estimation.estimated_tokens as f64
             * self.compression_config.target_compression_ratio)
-            as usize)
-            .min(self.compression_config.compression_threshold);
+            as usize;
 
         let compression_prompt =
             self.build_compression_prompt(content, content_type, target_tokens);

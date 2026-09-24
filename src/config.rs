@@ -184,8 +184,9 @@ pub struct LLMConfig {
     /// Maximum tokens
     pub max_tokens: u32,
 
-    /// Model context window length in tokens. Bounds how much content the
-    /// prompt compressor will attempt to process in a single call.
+    /// Model context window length in tokens. Drives the prompt compressor's
+    /// trigger (content above half the window is compressed) and its hard
+    /// truncation ceiling, plus the selection-index budget.
     /// Default: 150000 (conservative; raise for long-context models).
     #[serde(default = "default_context_length")]
     pub context_length: usize,

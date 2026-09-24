@@ -148,6 +148,13 @@ api_base_url = "https://api.openai.com/v1"
 # Internal working directory
 internal_path = ".litho"
 
+# Model context window length in tokens. Drives the prompt compressor's
+# trigger (content above half this window is compressed) and its hard
+# truncation ceiling, plus the selection-index budget.
+# Default: 150000. Raise it for long-context models, e.g. 1000000 for a
+# 1M-token model, so large intermediate content passes through uncompressed.
+# context_length = 150000
+
 # High-efficiency model for regular inference tasks
 # OpenAI examples: "gpt-4o-mini", "gpt-3.5-turbo"
 # Anthropic examples: "claude-3-5-haiku-20241022"
