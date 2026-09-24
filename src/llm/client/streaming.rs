@@ -42,7 +42,7 @@ impl StreamProgress {
         bar.set_style(
             ProgressStyle::default_spinner()
                 .template(
-                    "{spinner:.green} {msg} · {pos} tok · {per_sec:.1} tok/s · {elapsed_precise}",
+                    "{spinner:.green} {msg} · {pos} tok · {per_sec} · {elapsed_precise}",
                 )
                 .expect("valid progress template"),
         );

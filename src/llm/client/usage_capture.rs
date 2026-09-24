@@ -57,10 +57,9 @@ struct CaptureStore {
 static CAPTURE_STORE: LazyLock<CaptureStore> = LazyLock::new(CaptureStore::default);
 
 fn current_task_key() -> Option<tokio::task::Id> {
-    if tokio::runtime::Handle::try_current().is_err() {
-        return None;
-    }
-    Some(tokio::task::id())
+    // `task::id()` panics when polled outside a spawned task (e.g. the main
+    // future under `#[tokio::main]`); `try_id` degrades to no-capture there.
+    tokio::task::try_id()
 }
 
 fn store(captured: CapturedResponse) {
@@ -155,7 +154,8 @@ where
         async move {
             let resp: Response<LazyBody<Bytes>> = inner.send::<Bytes, Bytes>(req2).await?;
             let status = resp.status();
-            let headers = collect_headers(resp.headers());
+            let header_map = resp.headers().clone();
+            let headers = collect_headers(&header_map);
             let body_fut = resp.into_body();
 
             let lazy: LazyBody<U> = Box::pin(async move {
@@ -171,10 +171,11 @@ where
                 Ok(U::from(bytes))
             });
 
-            Response::builder()
-                .status(status)
-                .body(lazy)
-                .map_err(http_client::Error::Protocol)
+            let mut builder = Response::builder().status(status);
+            if let Some(hs) = builder.headers_mut() {
+                *hs = header_map;
+            }
+            builder.body(lazy).map_err(http_client::Error::Protocol)
         }
     }
 
@@ -206,7 +207,8 @@ where
         async move {
             let resp: StreamingResponse = inner.send_streaming(req2).await?;
             let status = resp.status();
-            let headers = collect_headers(resp.headers());
+            let header_map = resp.headers().clone();
+            let headers = collect_headers(&header_map);
 
             let tee = TeeStream {
                 inner: resp.into_body(),
@@ -218,10 +220,11 @@ where
             };
 
             let boxed: BoxedStream = Box::pin(tee);
-            Response::builder()
-                .status(status)
-                .body(boxed)
-                .map_err(http_client::Error::Protocol)
+            let mut builder = Response::builder().status(status);
+            if let Some(hs) = builder.headers_mut() {
+                *hs = header_map;
+            }
+            builder.body(boxed).map_err(http_client::Error::Protocol)
         }
     }
 }
@@ -442,5 +445,137 @@ mod tests {
         assert_eq!(rec.output_tokens, 3);
         assert_eq!(rec.cost_usd, Some(0.0005));
         assert!(rec.stream);
+    }
+
+    #[tokio::test]
+    async fn send_preserves_response_headers() {
+        let client = CapturingHttpClient::new(MockInner);
+        let resp = client
+            .send::<Bytes, Bytes>(Request::new(Bytes::new()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_preserves_content_type_for_sse_check() {
+        // Run inside a spawned task so the capture sink can key by task id.
+        let (status, content_type, body_text, captures) =
+            tokio::spawn(async move {
+                let client = CapturingHttpClient::new(MockInner);
+                let resp =
+                    client.send_streaming(Request::new(Bytes::new())).await.unwrap();
+                let status = resp.status().as_u16();
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+
+                // Chunks pass through the tee unchanged.
+                use futures::StreamExt;
+                let mut body = resp.into_body();
+                let mut acc: Vec<u8> = Vec::new();
+                while let Some(chunk) = body.next().await {
+                    acc.extend_from_slice(&chunk.unwrap());
+                }
+                let text = String::from_utf8_lossy(&acc).to_string();
+                let captures = take_captures_for_current_task();
+                (status, content_type, text, captures)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(status, 200);
+        // rig's GenericEventSource rejects responses whose content-type is
+        // not text/event-stream; the rebuilt response must keep it.
+        assert_eq!(content_type, "text/event-stream");
+        assert!(body_text.contains("\"content\":\"hi\""));
+
+        // The tee stored the raw exchange for the current task.
+        assert_eq!(captures.len(), 1);
+        assert!(captures[0].stream);
+        assert_eq!(captures[0].body, body_text);
+        assert_eq!(
+            captures[0].header("content-type"),
+            Some("text/event-stream")
+        );
+    }
+
+    /// Minimal inner transport that answers with an SSE-shaped response so
+    /// the capturing wrapper's header preservation can be verified.
+    #[derive(Clone, Default)]
+    struct MockInner;
+
+    impl HttpClientExt for MockInner {
+        fn send<T, U>(
+            &self,
+            req: Request<T>,
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        where
+            T: Into<Bytes> + WasmCompatSend,
+            U: From<Bytes> + WasmCompatSend + 'static,
+        {
+            let (_, body) = req.into_parts();
+            let _body_bytes: Bytes = body.into();
+            async move {
+                let mut b = Response::builder().status(200);
+                if let Some(hs) = b.headers_mut() {
+                    hs.insert("content-type", "application/json".parse().unwrap());
+                }
+                let lazy: LazyBody<U> = Box::pin(async {
+                    Ok(U::from(Bytes::from_static(b"{}")))
+                });
+                b.body(lazy).map_err(http_client::Error::Protocol)
+            }
+        }
+
+        fn send_multipart<U>(
+            &self,
+            req: Request<http_client::MultipartForm>,
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        where
+            U: From<Bytes> + WasmCompatSend + 'static,
+        {
+            let _ = req;
+            async move {
+                let mut b = Response::builder().status(200);
+                let lazy: LazyBody<U> = Box::pin(async {
+                    Ok(U::from(Bytes::from_static(b"{}")))
+                });
+                b.body(lazy).map_err(http_client::Error::Protocol)
+            }
+        }
+
+        fn send_streaming<T>(
+            &self,
+            req: Request<T>,
+        ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+        where
+            T: Into<Bytes> + WasmCompatSend,
+        {
+            let (_, body) = req.into_parts();
+            let _body_bytes: Bytes = body.into();
+            async move {
+                let chunks: Vec<http_client::Result<Bytes>> = vec![
+                    Ok(Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                    )),
+                    Ok(Bytes::from_static(b"data:\n")),
+                ];
+                let boxed: BoxedStream = Box::pin(futures::stream::iter(chunks));
+                let mut b = Response::builder().status(200);
+                if let Some(hs) = b.headers_mut() {
+                    hs.insert("content-type", "text/event-stream".parse().unwrap());
+                }
+                b.body(boxed).map_err(http_client::Error::Protocol)
+            }
+        }
     }
 }
