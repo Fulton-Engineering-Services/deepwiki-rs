@@ -445,18 +445,19 @@ fn opt_u64(v: &Option<u64>) -> String {
     v.map(|n| n.to_string()).unwrap_or_else(|| "-".into())
 }
 
-/// Append records to `<internal>/cost_usage/calls.jsonl`. Called
-/// incrementally as each funnel drains its captures, so per-call data
-/// survives interruption without waiting for the end-of-run report.
+/// Append records to `<cost_usage_dir>/calls.jsonl`. Called incrementally as
+/// each funnel drains its captures, so per-call data survives interruption
+/// without waiting for the end-of-run report. The directory is CWD-anchored
+/// (like the LLM cache) so records stay durable even when the analysis
+/// target is a disposable shadow tree.
 pub fn append_records_jsonl(
-    internal_path: &std::path::Path,
+    cost_usage_dir: &std::path::Path,
     records: &[UsageRecord],
 ) -> anyhow::Result<()> {
     if records.is_empty() {
         return Ok(());
     }
-    let dir = internal_path.join("cost_usage");
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(cost_usage_dir)?;
     let mut jsonl = String::new();
     for c in records {
         jsonl.push_str(&serde_json::to_string(c)?);
@@ -466,7 +467,7 @@ pub fn append_records_jsonl(
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("calls.jsonl"))?;
+        .open(cost_usage_dir.join("calls.jsonl"))?;
     f.write_all(jsonl.as_bytes())?;
     Ok(())
 }
@@ -476,17 +477,19 @@ pub fn append_records_jsonl(
 static JSONL_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Persist the execution report snapshot to
-/// `<internal>/cost_usage/<id>.json`. Per-call lines live in `calls.jsonl`,
+/// `<cost_usage_dir>/<id>.json`. Per-call lines live in `calls.jsonl`,
 /// appended incrementally by [`append_records_jsonl`]; this snapshot is the
 /// aggregated end-of-run view.
 pub fn persist(
-    internal_path: &std::path::Path,
+    cost_usage_dir: &std::path::Path,
     report: &ExecutionUsageReport,
 ) -> anyhow::Result<()> {
-    let dir = internal_path.join("cost_usage");
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(cost_usage_dir)?;
     let json = serde_json::to_string_pretty(report)?;
-    std::fs::write(dir.join(format!("{}.json", report.execution_id)), json)?;
+    std::fs::write(
+        cost_usage_dir.join(format!("{}.json", report.execution_id)),
+        json,
+    )?;
     Ok(())
 }
 
@@ -560,10 +563,10 @@ pub fn record_from_captures(
 
     // Durable per-call lines, written as each funnel drains — an interrupted
     // run keeps everything recorded so far.
-    if let Err(e) = append_records_jsonl(&config.internal_path, &built)
+    if let Err(e) = append_records_jsonl(&config.cost_usage_dir, &built)
         && !JSONL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
     {
-        eprintln!("⚠️  Warning: failed to append cost/usage records to {}: {}", config.internal_path.join("cost_usage/calls.jsonl").display(), e);
+        eprintln!("⚠️  Warning: failed to append cost/usage records to {}: {}", config.cost_usage_dir.join("calls.jsonl").display(), e);
     }
     built.len()
 }
@@ -649,7 +652,7 @@ mod tests {
 
         let mut cfg = crate::config::Config::default();
         cfg.cost_and_usage = true;
-        cfg.internal_path = dir.clone();
+        cfg.cost_usage_dir = dir.clone();
         UsageTracker::global().begin_execution(
             "test-incr".into(),
             "p".into(),
@@ -664,7 +667,7 @@ mod tests {
 
         // JSONL is written incrementally, before the run ends.
         let jsonl =
-            std::fs::read_to_string(dir.join("cost_usage/calls.jsonl")).expect("jsonl written");
+            std::fs::read_to_string(dir.join("calls.jsonl")).expect("jsonl written");
         assert_eq!(jsonl.lines().count(), 2);
         assert!(jsonl.contains("\"execution_id\":\"test-incr\""));
 

@@ -164,8 +164,8 @@ pub struct Config {
     /// Enable cost and usage tracking (CLI --cost-and-usage). When true, the
     /// LiteLLM/OpenAI-compatible response (usage + cost in the body and
     /// x-litellm-* headers) is captured, a per-call `💰` line is printed,
-    /// records are persisted to `.litho/cost_usage/`, and a markdown report
-    /// is written to the docs output folder. Default: false.
+    /// records are persisted to `<cost_usage_dir>` incrementally, and a
+    /// markdown report is written to the docs output folder. Default: false.
     #[serde(default)]
     pub cost_and_usage: bool,
 
@@ -174,6 +174,19 @@ pub struct Config {
     /// sent on the wire.
     #[serde(default)]
     pub pricing_table: std::collections::HashMap<String, ModelPricing>,
+
+    /// Where cost & usage records are written when `cost_and_usage` is on.
+    /// Anchored the same way as the LLM cache (`cache_dir`): a relative path
+    /// resolves against the process CWD, NOT against `project_path` — this
+    /// keeps records durable even when the analysis target is a disposable
+    /// shadow tree (e.g. `.litho/tree/...` rebuilt per run).
+    /// Default: `.litho/cost_usage`.
+    #[serde(default = "default_cost_usage_dir")]
+    pub cost_usage_dir: PathBuf,
+}
+
+fn default_cost_usage_dir() -> PathBuf {
+    PathBuf::from(".litho/cost_usage")
 }
 
 /// LLM model configuration
@@ -821,6 +834,7 @@ impl Default for Config {
             verbose: false,
             cost_and_usage: false,
             pricing_table: std::collections::HashMap::new(),
+            cost_usage_dir: default_cost_usage_dir(),
         }
     }
 }
@@ -917,6 +931,7 @@ pricing_table = { "m" = { input_per_1k = 0.1, output_per_1k = 0.2 } }
         assert!(c.cost_and_usage);
         assert_eq!(c.pricing_table["m"].input_per_1k, 0.1);
         assert_eq!(c.pricing_table["m"].output_per_1k, 0.2);
+        assert_eq!(c.cost_usage_dir, PathBuf::from(".litho/cost_usage"));
     }
 
     #[test]

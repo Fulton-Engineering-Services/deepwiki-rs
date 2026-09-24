@@ -221,7 +221,7 @@ async fn emit_cost_usage_report(context: &GeneratorContext) {
         return;
     };
     if let Err(e) =
-        crate::llm::client::usage_tracker::persist(&context.config.internal_path, &report)
+        crate::llm::client::usage_tracker::persist(&context.config.cost_usage_dir, &report)
     {
         eprintln!("\u{26a0}\u{fe0f}  Warning: failed to persist cost/usage records: {}", e);
     }

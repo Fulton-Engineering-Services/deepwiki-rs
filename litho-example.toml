@@ -23,9 +23,15 @@ target_language = "en"
 # When true, Litho captures the raw LiteLLM/OpenAI-compatible response
 # (usage + cost in the body, and x-litellm-* headers), shows a per-call
 # cost/usage line in the live progress output, writes per-execution records
-# to .litho/cost_usage/ (JSON + append-only calls.jsonl), and emits a
+# to <cost_usage_dir>/ (JSON + append-only calls.jsonl), and emits a
 # markdown report to <output_path>/__Litho_Cost_Usage_Report__.md.
 # Top-level key (like verbose) - no [llm] section required.
+
+# Where cost & usage records are written (default: .litho/cost_usage).
+# Anchored like the LLM cache: a relative path resolves against the process
+# CWD (NOT project_path), keeping records durable when the analysis target
+# is a disposable shadow tree. Written incrementally as calls complete.
+# cost_usage_dir = ".litho/cost_usage"
 
 # Optional per-model pricing (USD per 1K tokens) used to estimate cost when
 # the provider does not report it. Keys are model names as sent on the wire.
