@@ -1,7 +1,7 @@
 //! Summary reasoning module - Fallover mechanism when ReAct mode reaches max iterations
 
 use anyhow::Result;
-use rig::completion::Message;
+use rig_core::completion::Message;
 
 use super::providers::ProviderAgent;
 
@@ -105,13 +105,13 @@ impl SummaryReasoner {
                     
                     for item in content.iter() {
                         match item {
-                            rig::completion::AssistantContent::Text(text) => {
+                            rig_core::completion::AssistantContent::Text(text) => {
                                 if !text.text.is_empty() {
                                     details.push_str(&format!("**Text Reply:** {}\n\n", text.text));
                                     has_content = true;
                                 }
                             }
-                            rig::completion::AssistantContent::ToolCall(tool_call) => {
+                            rig_core::completion::AssistantContent::ToolCall(tool_call) => {
                                 details.push_str(&format!(
                                     "**Tool Call:** `{}` \nArguments: `{}`\n\n",
                                     tool_call.function.name, 
@@ -119,14 +119,14 @@ impl SummaryReasoner {
                                 ));
                                 has_content = true;
                             }
-                            rig::completion::AssistantContent::Reasoning(reasoning) => {
+                            rig_core::completion::AssistantContent::Reasoning(reasoning) => {
                                 let reasoning_text = reasoning.display_text();
                                 if !reasoning_text.is_empty() {
                                     details.push_str(&format!("**Reasoning Process:** {}\n\n", reasoning_text));
                                     has_content = true;
                                 }
                             }
-                            rig::completion::AssistantContent::Image(_) => {
+                            rig_core::completion::AssistantContent::Image(_) => {
                                 // Skip image content in summary
                             }
                         }

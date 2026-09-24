@@ -1,6 +1,6 @@
 //! ReAct (Reasoning and Acting) pattern related types and configuration
 
-use rig::completion::Message;
+use rig_core::completion::Message;
 
 /// ReAct mode configuration
 #[derive(Debug, Clone)]

@@ -1,12 +1,14 @@
 //! LLM Provider support module
 
 use anyhow::Result;
-use rig::{
+use rig_core::{
     agent::Agent,
     client::CompletionClient,
-    completion::Prompt,
+    completion::{CompletionModel, GetTokenUsage, Prompt},
     extractor::Extractor,
     providers::gemini::completion::gemini_api_types::{AdditionalParameters, GenerationConfig},
+    streaming::StreamingPrompt,
+    wasm_compat::WasmCompatSend,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -18,18 +20,19 @@ use crate::{
 
 use super::ollama_extractor::OllamaExtractorWrapper;
 use super::openai_compatible_extractor::OpenAICompatibleExtractorWrapper;
+use super::streaming::{collect_openai_sse, drain_to_string};
 
 /// Unified Provider client enum
 #[derive(Clone)]
 pub enum ProviderClient {
-    OpenAI(rig::providers::openai::CompletionsClient),
-    Moonshot(rig::providers::moonshot::Client),
-    DeepSeek(rig::providers::deepseek::Client),
-    Mistral(rig::providers::mistral::Client),
-    OpenRouter(rig::providers::openrouter::Client),
-    Anthropic(rig::providers::anthropic::Client),
-    Gemini(rig::providers::gemini::Client),
-    Ollama(rig::providers::ollama::Client),
+    OpenAI(rig_core::providers::openai::CompletionsClient),
+    Moonshot(rig_core::providers::moonshot::Client),
+    DeepSeek(rig_core::providers::deepseek::Client),
+    Mistral(rig_core::providers::mistral::Client),
+    OpenRouter(rig_core::providers::openrouter::Client),
+    Anthropic(rig_core::providers::anthropic::Client),
+    Gemini(rig_core::providers::gemini::Client),
+    Ollama(rig_core::providers::ollama::Client),
 }
 
 impl ProviderClient {
@@ -38,37 +41,37 @@ impl ProviderClient {
         match config.provider {
             LLMProvider::OpenAI => {
                 let client = if config.api_base_url != "https://api.openai.com/v1" {
-                    rig::providers::openai::Client::builder()
+                    rig_core::providers::openai::Client::builder()
                         .api_key(&config.api_key)
                         .base_url(&config.api_base_url)
                         .build()?
                         .completions_api()
                 } else {
-                    rig::providers::openai::Client::new(&config.api_key)?
+                    rig_core::providers::openai::Client::new(&config.api_key)?
                         .completions_api()
                 };
                 Ok(ProviderClient::OpenAI(client))
             }
             LLMProvider::Moonshot => {
-                let client = rig::providers::moonshot::Client::builder()
+                let client = rig_core::providers::moonshot::Client::builder()
                     .api_key(&config.api_key)
                     .base_url(&config.api_base_url)
                     .build()?;
                 Ok(ProviderClient::Moonshot(client))
             }
             LLMProvider::DeepSeek => {
-                let client = rig::providers::deepseek::Client::builder()
+                let client = rig_core::providers::deepseek::Client::builder()
                     .api_key(&config.api_key)
                     .base_url(&config.api_base_url)
                     .build()?;
                 Ok(ProviderClient::DeepSeek(client))
             }
             LLMProvider::Mistral => {
-                let client = rig::providers::mistral::Client::new(&config.api_key)?;
+                let client = rig_core::providers::mistral::Client::new(&config.api_key)?;
                 Ok(ProviderClient::Mistral(client))
             }
             LLMProvider::OpenRouter => {
-                let client = rig::providers::openrouter::Client::new(&config.api_key)?;
+                let client = rig_core::providers::openrouter::Client::new(&config.api_key)?;
                 Ok(ProviderClient::OpenRouter(client))
             }
             LLMProvider::Anthropic => {
@@ -79,22 +82,22 @@ impl ProviderClient {
                 let use_custom_url = normalized_url != "https://api.anthropic.com"
                     && normalized_url.contains("anthropic");
                 let client = if use_custom_url {
-                    rig::providers::anthropic::Client::builder()
+                    rig_core::providers::anthropic::Client::builder()
                         .api_key(&config.api_key)
                         .base_url(&config.api_base_url)
                         .build()?
                 } else {
-                    rig::providers::anthropic::Client::new(&config.api_key)?
+                    rig_core::providers::anthropic::Client::new(&config.api_key)?
                 };
                 Ok(ProviderClient::Anthropic(client))
             }
             LLMProvider::Gemini => {
-                let client = rig::providers::gemini::Client::new(&config.api_key)?;
+                let client = rig_core::providers::gemini::Client::new(&config.api_key)?;
                 Ok(ProviderClient::Gemini(client))
             }
             LLMProvider::Ollama => {
-                let client = rig::providers::ollama::Client::builder()
-                    .api_key(rig::client::Nothing)
+                let client = rig_core::providers::ollama::Client::builder()
+                    .api_key(rig_core::client::Nothing)
                     .base_url(&config.api_base_url)
                     .build()?;
                 Ok(ProviderClient::Ollama(client))
@@ -129,6 +132,7 @@ impl ProviderClient {
                     system_prompt: system_prompt.to_string(),
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
+                    stream: config.stream_enabled(),
                 }
             }
             ProviderClient::Moonshot(client) => {
@@ -141,7 +145,11 @@ impl ProviderClient {
                 }
 
                 let agent = builder.build();
-                ProviderAgent::Moonshot(agent)
+                ProviderAgent::Moonshot(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::DeepSeek(client) => {
                 let mut builder = client
@@ -153,7 +161,11 @@ impl ProviderClient {
                 }
 
                 let agent = builder.build();
-                ProviderAgent::DeepSeek(agent)
+                ProviderAgent::DeepSeek(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Mistral(client) => {
                 let mut builder = client
@@ -165,7 +177,11 @@ impl ProviderClient {
                 }
 
                 let agent = builder.build();
-                ProviderAgent::Mistral(agent)
+                ProviderAgent::Mistral(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::OpenRouter(client) => {
                 let mut builder = client
@@ -177,7 +193,11 @@ impl ProviderClient {
                 }
 
                 let agent = builder.build();
-                ProviderAgent::OpenRouter(agent)
+                ProviderAgent::OpenRouter(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Anthropic(client) => {
                 let mut builder = client
@@ -190,7 +210,11 @@ impl ProviderClient {
                 }
 
                 let agent = builder.build();
-                ProviderAgent::Anthropic(agent)
+                ProviderAgent::Anthropic(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Gemini(client) => {
                 let gen_cfg = GenerationConfig::default();
@@ -208,7 +232,11 @@ impl ProviderClient {
                 let agent = builder
                     .additional_params(serde_json::to_value(cfg).unwrap())
                     .build();
-                ProviderAgent::Gemini(agent)
+                ProviderAgent::Gemini(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Ollama(client) => {
                 let mut builder = client
@@ -221,7 +249,11 @@ impl ProviderClient {
                 }
 
                 let agent = builder.build();
-                ProviderAgent::Ollama(agent)
+                ProviderAgent::Ollama(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
         }
     }
@@ -262,6 +294,7 @@ impl ProviderClient {
                     system_prompt: system_prompt.to_string(),
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
+                    stream: config.stream_enabled(),
                 }
             }
             ProviderClient::Moonshot(client) => {
@@ -280,7 +313,11 @@ impl ProviderClient {
                     .tool(file_reader.clone())
                     .tool(tool_time)
                     .build();
-                ProviderAgent::Moonshot(agent)
+                ProviderAgent::Moonshot(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::DeepSeek(client) => {
                 let mut builder = client
@@ -298,7 +335,11 @@ impl ProviderClient {
                     .tool(file_reader.clone())
                     .tool(tool_time)
                     .build();
-                ProviderAgent::DeepSeek(agent)
+                ProviderAgent::DeepSeek(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Mistral(client) => {
                 let mut builder = client
@@ -315,7 +356,11 @@ impl ProviderClient {
                     .tool(file_reader.clone())
                     .tool(tool_time)
                     .build();
-                ProviderAgent::Mistral(agent)
+                ProviderAgent::Mistral(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::OpenRouter(client) => {
                 let mut builder = client
@@ -332,7 +377,11 @@ impl ProviderClient {
                     .tool(file_reader.clone())
                     .tool(tool_time)
                     .build();
-                ProviderAgent::OpenRouter(agent)
+                ProviderAgent::OpenRouter(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Anthropic(client) => {
                 let mut builder = client
@@ -350,7 +399,11 @@ impl ProviderClient {
                     .tool(file_reader.clone())
                     .tool(tool_time)
                     .build();
-                ProviderAgent::Anthropic(agent)
+                ProviderAgent::Anthropic(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Gemini(client) => {
                 let gen_cfg = GenerationConfig::default();
@@ -372,7 +425,11 @@ impl ProviderClient {
                     .tool(tool_time)
                     .additional_params(serde_json::to_value(cfg).unwrap())
                     .build();
-                ProviderAgent::Gemini(agent)
+                ProviderAgent::Gemini(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
             ProviderClient::Ollama(client) => {
                 let mut builder = client
@@ -390,7 +447,11 @@ impl ProviderClient {
                     .tool(file_reader.clone())
                     .tool(tool_time)
                     .build();
-                ProviderAgent::Ollama(agent)
+                ProviderAgent::Ollama(AgentHandle {
+                    agent,
+                    model: model.to_string(),
+                    stream: config.stream_enabled(),
+                })
             }
         }
     }
@@ -426,6 +487,7 @@ impl ProviderClient {
                     config.api_base_url.clone(),
                     model.to_string(),
                     config.api_key.clone(),
+                    config.stream_enabled(),
                 );
 
                 ProviderExtractor::OpenAI(wrapper)
@@ -502,6 +564,7 @@ impl ProviderClient {
                     config.retry_attempts,
                     config.api_base_url.clone(),
                     model.to_string(),
+                    config.stream_enabled(),
                 );
 
                 ProviderExtractor::Ollama(wrapper)
@@ -513,7 +576,7 @@ impl ProviderClient {
 /// Unified Agent enum
 pub enum ProviderAgent {
     OpenAI {
-        agent: Agent<rig::providers::openai::completion::CompletionModel>,
+        agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
         base_url: String,
         model: String,
         api_key: String,
@@ -522,14 +585,24 @@ pub enum ProviderAgent {
         system_prompt: String,
         max_tokens: u32,
         temperature: Option<f64>,
+        stream: bool,
     },
-    Mistral(Agent<rig::providers::mistral::CompletionModel>),
-    OpenRouter(Agent<rig::providers::openrouter::CompletionModel>),
-    Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
-    Gemini(Agent<rig::providers::gemini::completion::CompletionModel>),
-    Moonshot(Agent<rig::providers::moonshot::CompletionModel>),
-    DeepSeek(Agent<rig::providers::deepseek::CompletionModel>),
-    Ollama(Agent<rig::providers::ollama::CompletionModel>),
+    Mistral(AgentHandle<Agent<rig_core::providers::mistral::CompletionModel>>),
+    OpenRouter(AgentHandle<Agent<rig_core::providers::openrouter::CompletionModel>>),
+    Anthropic(AgentHandle<Agent<rig_core::providers::anthropic::completion::CompletionModel>>),
+    Gemini(AgentHandle<Agent<rig_core::providers::gemini::completion::CompletionModel>>),
+    Moonshot(AgentHandle<Agent<rig_core::providers::moonshot::CompletionModel>>),
+    DeepSeek(AgentHandle<Agent<rig_core::providers::deepseek::CompletionModel>>),
+    Ollama(AgentHandle<Agent<rig_core::providers::ollama::CompletionModel>>),
+}
+
+/// Agent payload plus the transport settings shared by the tuple-style
+/// ProviderAgent variants: the model label (for progress reporting) and the
+/// per-provider streaming flag resolved from `LLMConfig::stream_enabled`.
+pub struct AgentHandle<A> {
+    pub agent: A,
+    pub model: String,
+    pub stream: bool,
 }
 
 impl ProviderAgent {
@@ -537,9 +610,22 @@ impl ProviderAgent {
     pub async fn prompt(&self, prompt: &str, concurrency: usize) -> Result<String> {
         let concurrency = concurrency.max(1);
         match self {
-            ProviderAgent::OpenAI { agent, base_url, model, api_key, system_prompt, max_tokens, temperature } => {
-                // Try rig agent first with concurrency
-                match agent.prompt(prompt).with_tool_concurrency(concurrency).await {
+            ProviderAgent::OpenAI { agent, base_url, model, api_key, system_prompt, max_tokens, temperature, stream } => {
+                // Try rig agent first (streaming when enabled) with concurrency
+                let rig_result = if *stream {
+                    let stream_items = agent
+                        .stream_prompt(prompt)
+                        .tool_concurrency(concurrency)
+                        .await;
+                    drain_to_string(stream_items, Some(model)).await
+                } else {
+                    agent
+                        .prompt(prompt)
+                        .tool_concurrency(concurrency)
+                        .await
+                        .map_err(anyhow::Error::from)
+                };
+                match rig_result {
                     Ok(result) => Ok(result),
                     Err(e) => {
                         let error_msg = format!("{:?}", e);
@@ -548,7 +634,7 @@ impl ProviderAgent {
                             || error_msg.contains("untagged enum")
                             || error_msg.contains("JsonError")
                         {
-                            // Fallback to direct HTTP call
+                            // Fallback to direct HTTP call (SSE when streaming)
                             Self::prompt_via_http(
                                 base_url,
                                 model,
@@ -557,35 +643,65 @@ impl ProviderAgent {
                                 *max_tokens,
                                 *temperature,
                                 prompt,
+                                *stream,
                             )
                             .await
                         } else {
-                            Err(e.into())
+                            Err(e)
                         }
                     }
                 }
             }
-            ProviderAgent::Moonshot(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::Moonshot(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
-            ProviderAgent::DeepSeek(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::DeepSeek(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
-            ProviderAgent::Mistral(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::Mistral(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
-            ProviderAgent::OpenRouter(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::OpenRouter(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
-            ProviderAgent::Anthropic(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::Anthropic(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
-            ProviderAgent::Gemini(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::Gemini(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
-            ProviderAgent::Ollama(agent) => {
-                agent.prompt(prompt).with_tool_concurrency(concurrency).await.map_err(|e| e.into())
+            ProviderAgent::Ollama(handle) => {
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
             }
+        }
+    }
+
+    /// Prompt a single agent without an HTTP fallback: stream (with tool
+    /// concurrency preserved) when enabled, otherwise use the classic
+    /// non-streaming request path.
+    async fn prompt_single<M>(
+        agent: &Agent<M>,
+        model: &str,
+        stream: bool,
+        prompt: &str,
+        concurrency: usize,
+    ) -> Result<String>
+    where
+        M: CompletionModel + 'static,
+        M::StreamingResponse: GetTokenUsage + WasmCompatSend,
+    {
+        if stream {
+            let stream_items = agent
+                .stream_prompt(prompt)
+                .tool_concurrency(concurrency)
+                .await;
+            drain_to_string(stream_items, Some(model)).await
+        } else {
+            agent
+                .prompt(prompt)
+                .tool_concurrency(concurrency)
+                .await
+                .map_err(|e| e.into())
         }
     }
 
@@ -595,6 +711,9 @@ impl ProviderAgent {
     /// `system` message and max_tokens / temperature come from config instead
     /// of hardcoded values (previously 4096 / 0.7, which silently truncated
     /// long documents and dropped the agent's role/output-format preamble).
+    ///
+    /// With `stream = true` the request uses SSE and collects the deltas into
+    /// the same complete string the JSON path would have returned.
     #[allow(clippy::too_many_arguments)]
     async fn prompt_via_http(
         base_url: &str,
@@ -604,8 +723,18 @@ impl ProviderAgent {
         max_tokens: u32,
         temperature: Option<f64>,
         prompt: &str,
+        stream: bool,
     ) -> Result<String> {
-        let client = reqwest::Client::new();
+        // Streaming: bound per-read activity instead of a total request
+        // timeout, which would otherwise kill long-running SSE responses.
+        let client = if stream {
+            reqwest::Client::builder()
+                .read_timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?
+        } else {
+            reqwest::Client::new()
+        };
 
         let mut messages = Vec::new();
         if !system_prompt.is_empty() {
@@ -627,13 +756,21 @@ impl ProviderAgent {
         if let Some(temp) = temperature {
             request_body["temperature"] = serde_json::json!(temp);
         }
+        if stream {
+            request_body["stream"] = serde_json::json!(true);
+        }
 
-        let response = client
+        let request = client
             .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(120))
+            .json(&request_body);
+        let request = if stream {
+            request
+        } else {
+            request.timeout(std::time::Duration::from_secs(120))
+        };
+        let response = request
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?;
@@ -642,6 +779,10 @@ impl ProviderAgent {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             anyhow::bail!("OpenAI-compatible API HTTP error {}: {}", status, body);
+        }
+
+        if stream {
+            return collect_openai_sse(response, model).await;
         }
 
         let json: serde_json::Value = response
@@ -667,12 +808,12 @@ where
     T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
 {
     OpenAI(OpenAICompatibleExtractorWrapper<T>),
-    Mistral(Extractor<rig::providers::mistral::CompletionModel, T>),
-    OpenRouter(Extractor<rig::providers::openrouter::CompletionModel, T>),
-    Anthropic(Extractor<rig::providers::anthropic::completion::CompletionModel, T>),
-    Gemini(Extractor<rig::providers::gemini::completion::CompletionModel, T>),
-    Moonshot(Extractor<rig::providers::moonshot::CompletionModel, T>),
-    DeepSeek(Extractor<rig::providers::deepseek::CompletionModel, T>),
+    Mistral(Extractor<rig_core::providers::mistral::CompletionModel, T>),
+    OpenRouter(Extractor<rig_core::providers::openrouter::CompletionModel, T>),
+    Anthropic(Extractor<rig_core::providers::anthropic::completion::CompletionModel, T>),
+    Gemini(Extractor<rig_core::providers::gemini::completion::CompletionModel, T>),
+    Moonshot(Extractor<rig_core::providers::moonshot::CompletionModel, T>),
+    DeepSeek(Extractor<rig_core::providers::deepseek::CompletionModel, T>),
     Ollama(OllamaExtractorWrapper<T>),
 }
 

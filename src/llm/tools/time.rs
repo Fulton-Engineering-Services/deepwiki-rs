@@ -1,7 +1,7 @@
 //! Time query tool
 
 use anyhow::Result;
-use rig::tool::Tool;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -73,21 +73,22 @@ impl Tool for AgentToolTime {
     type Args = TimeArgs;
     type Output = TimeResult;
 
-    async fn definition(&self, _prompt: String) -> rig::completion::ToolDefinition {
-        rig::completion::ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Get current date and time information, including local time, UTC time, and timestamp.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "format": {
-                        "type": "string",
-                        "description": "Time format string (default is '%Y-%m-%d %H:%M:%S'). Supports chrono formatting syntax."
-                    }
-                },
-                "required": []
-            }),
-        }
+    fn description(&self) -> String {
+        "Get current date and time information, including local time, UTC time, and timestamp."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "format": {
+                    "type": "string",
+                    "description": "Time format string (default is '%Y-%m-%d %H:%M:%S'). Supports chrono formatting syntax."
+                }
+            },
+            "required": []
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {

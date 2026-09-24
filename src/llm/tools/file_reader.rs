@@ -1,7 +1,7 @@
 //! File reading tool
 
 use anyhow::Result;
-use rig::tool::Tool;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -134,34 +134,34 @@ impl Tool for AgentToolFileReader {
     type Args = FileReaderArgs;
     type Output = FileReaderResult;
 
-    async fn definition(&self, _prompt: String) -> rig::completion::ToolDefinition {
-        rig::completion::ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Read source code or text-based content from the project, with support for specifying line ranges and maximum line limits. Automatically handles large files and binary files."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "File path to read (relative to project root)"
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "description": "Start line number (1-based, inclusive)"
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "description": "End line number (inclusive)"
-                    },
-                    "max_lines": {
-                        "type": "integer",
-                        "description": "Maximum number of lines to read (from file start, default is 200)"
-                    }
+    fn description(&self) -> String {
+        "Read source code or text-based content from the project, with support for specifying line ranges and maximum line limits. Automatically handles large files and binary files."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "File path to read (relative to project root)"
                 },
-                "required": ["file_path"]
-            }),
-        }
+                "start_line": {
+                    "type": "integer",
+                    "description": "Start line number (1-based, inclusive)"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "End line number (inclusive)"
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read (from file start, default is 200)"
+                }
+            },
+            "required": ["file_path"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {

@@ -5,11 +5,13 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use rig::{agent::Agent, completion::Prompt};
+use rig_core::{agent::Agent, completion::Prompt, streaming::StreamingPrompt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
+
+use super::streaming::drain_to_string;
 
 /// JSON code block regex pattern
 static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
@@ -17,10 +19,11 @@ static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
 
 /// Ollama structured output extractor
 pub struct OllamaExtractorWrapper<T> {
-    agent: Agent<rig::providers::ollama::CompletionModel>,
+    agent: Agent<rig_core::providers::ollama::CompletionModel>,
     max_retries: u32,
     base_url: String,
     model: String,
+    stream: bool,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -30,16 +33,18 @@ where
 {
     /// Create a new Ollama extractor with explicit configuration
     pub fn with_config(
-        agent: Agent<rig::providers::ollama::CompletionModel>,
+        agent: Agent<rig_core::providers::ollama::CompletionModel>,
         max_retries: u32,
         base_url: String,
         model: String,
+        stream: bool,
     ) -> Self {
         Self {
             agent,
             max_retries,
             base_url,
             model,
+            stream,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -83,12 +88,22 @@ where
     }
 
     /// Try extraction via rig agent
+    ///
+    /// Streams when the profile opts in (`stream = true`); deltas are
+    /// accumulated into the complete text before parsing. The raw HTTP
+    /// fallback below stays non-streaming (`"stream": false`).
     async fn try_extract_via_rig(&self, prompt: &str, attempt: usize) -> Result<T> {
-        let response = self
-            .agent
-            .prompt(prompt)
-            .await
-            .context("Failed to get response from Ollama via rig")?;
+        let response = if self.stream {
+            let stream_items = self.agent.stream_prompt(prompt).await;
+            drain_to_string(stream_items, Some(&self.model))
+                .await
+                .context("Failed to get response from Ollama via rig")?
+        } else {
+            self.agent
+                .prompt(prompt)
+                .await
+                .context("Failed to get response from Ollama via rig")?
+        };
 
         self.parse_and_validate(&response, attempt)
     }

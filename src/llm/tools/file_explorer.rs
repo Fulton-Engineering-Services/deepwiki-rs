@@ -1,7 +1,7 @@
 //! File system exploration tool
 
 use anyhow::Result;
-use rig::tool::Tool;
+use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -506,40 +506,39 @@ impl Tool for AgentToolFileExplorer {
     type Args = FileExplorerArgs;
     type Output = FileExplorerResult;
 
-    async fn definition(&self, _prompt: String) -> rig::completion::ToolDefinition {
-        rig::completion::ToolDefinition {
-            name: Self::NAME.to_string(),
-            description:
-                "Explore project file structure, list directory contents, find specific file patterns. Supports recursive search and file filtering."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["list_directory", "find_files", "get_file_info"],
-                        "description": "Action type to execute: list_directory (list directory), find_files (find files), get_file_info (get file info)"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Target path (relative to project root)"
-                    },
-                    "pattern": {
-                        "type": "string",
-                        "description": "File search pattern (for find_files operation)"
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "Whether to recursively search subdirectories (default false)"
-                    },
-                    "max_files": {
-                        "type": "integer",
-                        "description": "Maximum number of files to return (default 100)"
-                    }
+    fn description(&self) -> String {
+        "Explore project file structure, list directory contents, find specific file patterns. Supports recursive search and file filtering."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list_directory", "find_files", "get_file_info"],
+                    "description": "Action type to execute: list_directory (list directory), find_files (find files), get_file_info (get file info)"
                 },
-                "required": ["action"]
-            }),
-        }
+                "path": {
+                    "type": "string",
+                    "description": "Target path (relative to project root)"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "File search pattern (for find_files operation)"
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "Whether to recursively search subdirectories (default false)"
+                },
+                "max_files": {
+                    "type": "integer",
+                    "description": "Maximum number of files to return (default 100)"
+                }
+            },
+            "required": ["action"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {

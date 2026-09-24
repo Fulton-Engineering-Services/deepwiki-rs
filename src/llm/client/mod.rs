@@ -14,6 +14,7 @@ mod openai_compatible_extractor;
 mod providers;
 mod react;
 mod react_executor;
+mod streaming;
 mod summary_reasoner;
 pub mod types;
 pub mod utils;

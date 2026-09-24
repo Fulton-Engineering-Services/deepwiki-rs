@@ -5,11 +5,13 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use rig::{agent::Agent, completion::Prompt};
+use rig_core::{agent::Agent, completion::Prompt, streaming::StreamingPrompt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
+
+use super::streaming::{collect_openai_sse, drain_to_string};
 
 /// JSON code block regex pattern
 static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
@@ -17,11 +19,12 @@ static JSON_CODE_BLOCK_REGEX: LazyLock<Regex> =
 
 /// OpenAI-compatible structured output extractor with HTTP fallback
 pub struct OpenAICompatibleExtractorWrapper<T> {
-    agent: Agent<rig::providers::openai::completion::CompletionModel>,
+    agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
     max_retries: u32,
     base_url: String,
     model: String,
     api_key: String,
+    stream: bool,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -31,11 +34,12 @@ where
 {
     /// Create a new OpenAI-compatible extractor with configuration
     pub fn new(
-        agent: Agent<rig::providers::openai::completion::CompletionModel>,
+        agent: Agent<rig_core::providers::openai::completion::CompletionModel>,
         max_retries: u32,
         base_url: String,
         model: String,
         api_key: String,
+        stream: bool,
     ) -> Self {
         Self {
             agent,
@@ -43,6 +47,7 @@ where
             base_url,
             model,
             api_key,
+            stream,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -88,22 +93,40 @@ where
     }
 
     /// Try extraction via rig agent
+    ///
+    /// Streams when enabled: deltas are accumulated into the complete text
+    /// first, so `parse_and_validate` only ever sees finished output.
     async fn try_extract_via_rig(&self, prompt: &str, attempt: usize) -> Result<T> {
-        let response = self
-            .agent
-            .prompt(prompt)
-            .await
-            .context("Failed to get response via rig")?;
+        let response = if self.stream {
+            let stream_items = self.agent.stream_prompt(prompt).await;
+            drain_to_string(stream_items, Some(&self.model))
+                .await
+                .context("Failed to get response via rig")?
+        } else {
+            self.agent
+                .prompt(prompt)
+                .await
+                .context("Failed to get response via rig")?
+        };
 
         self.parse_and_validate(&response, attempt)
     }
 
     /// Try extraction via direct HTTP call to OpenAI-compatible API
     async fn try_extract_via_http(&self, prompt: &str, attempt: usize) -> Result<T> {
-        let client = reqwest::Client::new();
+        // Streaming: bound per-read activity instead of a total request
+        // timeout, which would otherwise kill long-running SSE responses.
+        let client = if self.stream {
+            reqwest::Client::builder()
+                .read_timeout(std::time::Duration::from_secs(120))
+                .build()
+                .context("Failed to build HTTP client")?
+        } else {
+            reqwest::Client::new()
+        };
 
         // Build OpenAI-compatible request
-        let request_body = serde_json::json!({
+        let mut request_body = serde_json::json!({
             "model": self.model,
             "messages": [
                 {
@@ -114,13 +137,21 @@ where
             "temperature": 0.7,
             "max_tokens": 4096
         });
+        if self.stream {
+            request_body["stream"] = serde_json::json!(true);
+        }
 
-        let response = client
+        let request = client
             .post(format!("{}/chat/completions", self.base_url.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(120))
+            .json(&request_body);
+        let request = if self.stream {
+            request
+        } else {
+            request.timeout(std::time::Duration::from_secs(120))
+        };
+        let response = request
             .send()
             .await
             .context("Failed to send HTTP request to OpenAI-compatible API")?;
@@ -131,21 +162,25 @@ where
             anyhow::bail!("OpenAI-compatible API HTTP error {}: {}", status, body);
         }
 
-        let json: Value = response
-            .json()
-            .await
-            .context("Failed to parse OpenAI-compatible API HTTP response")?;
+        let response_text = if self.stream {
+            collect_openai_sse(response, &self.model).await?
+        } else {
+            let json: Value = response
+                .json()
+                .await
+                .context("Failed to parse OpenAI-compatible API HTTP response")?;
 
-        // Extract content from OpenAI response format
-        let response_text = json
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid OpenAI API response format"))?;
+            // Extract content from OpenAI response format
+            json.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid OpenAI API response format"))?
+                .to_string()
+        };
 
-        self.parse_and_validate(response_text, attempt)
+        self.parse_and_validate(&response_text, attempt)
     }
 
     /// Parse and validate JSON response

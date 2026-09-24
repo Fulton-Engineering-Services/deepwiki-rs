@@ -213,10 +213,29 @@ pub struct LLMConfig {
     /// Concurrency level for parallel tool execution
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: usize,
+
+    /// Stream inference responses instead of waiting for the full completion.
+    /// `None` derives the default from the provider: enabled for every
+    /// provider except Ollama (whose raw HTTP fallback stays non-streaming).
+    /// Streaming keeps long generations alive against proxy idle timeouts;
+    /// output is identical — deltas are accumulated and only complete JSON
+    /// is ever parsed.
+    #[serde(default)]
+    pub stream: Option<bool>,
 }
 
 fn default_max_turns() -> usize {
     100
+}
+
+impl LLMConfig {
+    /// Whether streaming should be used for inference calls with this config.
+    ///
+    /// Explicit `stream = true|false` in the profile wins; otherwise streaming
+    /// is on for every provider except Ollama.
+    pub fn stream_enabled(&self) -> bool {
+        self.stream.unwrap_or(self.provider != LLMProvider::Ollama)
+    }
 }
 
 fn default_context_length() -> usize {
@@ -789,6 +808,7 @@ impl Default for LLMConfig {
             max_parallels: 3,
             max_turns: 100,
             tool_concurrency: 4,
+            stream: None,
         }
     }
 }
@@ -856,5 +876,37 @@ mod tests {
         assert_eq!(config.code_insights_limit, 25);
         assert_eq!(config.include_source_code, false);
         assert_eq!(config.only_directories_when_files_more_than, Some(100));
+    }
+
+    #[test]
+    fn test_stream_enabled_defaults_and_overrides() {
+        // Provider-derived default: streaming on for every provider but Ollama.
+        let openrouter = LLMConfig {
+            provider: LLMProvider::OpenRouter,
+            ..Default::default()
+        };
+        assert!(openrouter.stream_enabled());
+
+        let ollama = LLMConfig {
+            provider: LLMProvider::Ollama,
+            ..Default::default()
+        };
+        assert!(!ollama.stream_enabled());
+
+        // Explicit profile setting wins over the provider default in both
+        // directions.
+        let forced_off = LLMConfig {
+            provider: LLMProvider::OpenRouter,
+            stream: Some(false),
+            ..Default::default()
+        };
+        assert!(!forced_off.stream_enabled());
+
+        let forced_on = LLMConfig {
+            provider: LLMProvider::Ollama,
+            stream: Some(true),
+            ..Default::default()
+        };
+        assert!(forced_on.stream_enabled());
     }
 }
