@@ -27,6 +27,7 @@ pub enum CostSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UsageRecord {
+    pub execution_id: Option<String>,
     pub timestamp: DateTime<chrono::Utc>,
     pub duration_ms: u64,
     pub model: String,
@@ -79,6 +80,7 @@ pub struct UsageRecord {
 impl Default for UsageRecord {
     fn default() -> Self {
         Self {
+            execution_id: None,
             timestamp: chrono::Utc::now(),
             duration_ms: 0,
             model: String::new(),
@@ -254,6 +256,12 @@ impl UsageTracker {
     /// Record one call.
     pub fn record(&self, record: UsageRecord) {
         self.inner.lock().unwrap().records.push(record);
+    }
+
+    /// The execution id currently in progress, if any.
+    pub fn current_execution_id(&self) -> Option<String> {
+        let id = self.inner.lock().unwrap().execution_id.clone();
+        (!id.is_empty()).then_some(id)
     }
 
     /// Build the aggregated execution report, marking the finish time.
@@ -471,7 +479,7 @@ pub fn record_from_captures(
     provider: &str,
     agent_tag: Option<String>,
     duration_ms: u64,
-    stream: bool,
+    _stream: bool,
     prompt_chars: usize,
     response_chars: usize,
     success: bool,
@@ -481,20 +489,32 @@ pub fn record_from_captures(
     if !config.cost_and_usage {
         return 0;
     }
+    let n_captures = captures.len();
+    if n_captures == 0 {
+        return 0;
+    }
+    let execution_id = UsageTracker::global().current_execution_id();
+    // One funnel call may cover several provider calls (ReAct turns,
+    // retries). Wall time and prompt/response sizes are funnel-scoped, so
+    // they are attributed to the first capture only, and the wall time is
+    // additionally spread evenly to keep per-model averages honest.
+    let even_duration_ms = duration_ms / n_captures as u64;
     let mut n = 0;
-    for cap in captures {
+    for (idx, cap) in captures.into_iter().enumerate() {
         let mut rec = crate::llm::client::usage_capture::extract_usage_record(&cap);
         if rec.model.is_empty() {
             rec.model = model.to_string();
         }
         rec.provider = provider.to_string();
-        rec.duration_ms = duration_ms;
+        rec.execution_id = execution_id.clone();
         rec.agent_tag = agent_tag.clone();
-        if !rec.stream {
-            rec.stream = stream;
-        }
-        rec.prompt_chars = prompt_chars;
-        rec.response_chars = response_chars;
+        rec.prompt_chars = if idx == 0 { prompt_chars } else { 0 };
+        rec.response_chars = if idx == 0 { response_chars } else { 0 };
+        rec.duration_ms = if idx == 0 {
+            duration_ms.saturating_sub(even_duration_ms * (n_captures as u64 - 1))
+        } else {
+            even_duration_ms
+        };
         if !success {
             rec.success = false;
             rec.error = error.clone();

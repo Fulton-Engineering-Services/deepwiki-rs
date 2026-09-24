@@ -20,11 +20,10 @@ use crate::{
 
 use super::ollama_extractor::OllamaExtractorWrapper;
 use super::openai_compatible_extractor::OpenAICompatibleExtractorWrapper;
-use super::streaming::{collect_openai_sse, drain_to_string, with_spinner};
+use super::streaming::{collect_openai_sse_with_capture, drain_to_string, with_spinner};
 use super::usage_capture::{
     take_captures_for_current_task, CapturingClient, OpenAIModel,
 };
-use super::usage_tracker;
 
 /// Unified Provider client enum
 #[derive(Clone)]
@@ -623,7 +622,6 @@ impl ProviderAgent {
         // Discard any stale captures from an uncovered caller so the sink
         // cannot grow unbounded; the real drain happens at the funnel.
         let _ = take_captures_for_current_task();
-        let _ = usage_tracker::UsageTracker::global();
         match self {
             ProviderAgent::OpenAI { agent, base_url, model, api_key, system_prompt, max_tokens, temperature, stream } => {
                 // Try rig agent first (streaming when enabled) with concurrency
@@ -797,7 +795,13 @@ impl ProviderAgent {
         }
 
         if stream {
-            return collect_openai_sse(response, model).await;
+            return collect_openai_sse_with_capture(
+                response,
+                model,
+                format!("{}/chat/completions", base_url.trim_end_matches('/')),
+                model.to_string(),
+            )
+            .await;
         }
 
         with_spinner(model, "reading response", async {

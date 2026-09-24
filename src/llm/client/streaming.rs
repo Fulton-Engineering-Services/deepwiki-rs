@@ -210,19 +210,57 @@ pub fn openai_sse_delta(data: &str) -> Option<String> {
 }
 
 /// Consume an OpenAI-compatible SSE response body into its complete content,
-/// reporting live progress under `label`.
+/// reporting live progress under `label`, and store the raw SSE exchange
+/// into the cost/usage capture sink for the current task (used by the raw
+/// HTTP fallback paths that bypass the capturing transport).
 ///
 /// The caller is responsible for the request body (`"stream": true`) and for
 /// checking the HTTP status before calling this.
-pub async fn collect_openai_sse(response: reqwest::Response, label: &str) -> Result<String> {
+pub async fn collect_openai_sse_with_capture(
+    response: reqwest::Response,
+    label: &str,
+    request_url: String,
+    request_model: String,
+) -> Result<String> {
+    collect_openai_sse_impl(response, label, Some((request_url, request_model))).await
+}
+
+async fn collect_openai_sse_impl(
+    response: reqwest::Response,
+    label: &str,
+    capture: Option<(String, String)>,
+) -> Result<String> {
     use eventsource_stream::Eventsource;
+
+    let (status, headers) = if capture.is_some() {
+        (
+            Some(response.status().as_u16()),
+            Some(
+                response
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    } else {
+        (None, None)
+    };
 
     let progress = StreamProgress::new(label, "streaming");
     let mut text = String::new();
+    let mut raw = capture.is_some().then(String::new);
     let mut events = response.bytes_stream().eventsource();
 
     while let Some(event) = events.next().await {
         let event = event.map_err(|e| anyhow::anyhow!("SSE stream error: {}", e))?;
+        if let Some(raw) = raw.as_mut() {
+            raw.push_str("data: ");
+            raw.push_str(&event.data);
+            raw.push('\n');
+        }
         if event.data.trim() == "[DONE]" {
             break;
         }
@@ -232,6 +270,21 @@ pub async fn collect_openai_sse(response: reqwest::Response, label: &str) -> Res
         }
     }
     progress.finish();
+
+    if let (Some((url, model)), Some(status), Some(headers), Some(body)) =
+        (capture, status, headers, raw)
+    {
+        crate::llm::client::usage_capture::capture_response(
+            crate::llm::client::usage_capture::CapturedResponse {
+                request_url: url,
+                request_model: Some(model),
+                status,
+                headers,
+                body,
+                stream: true,
+            },
+        );
+    }
 
     if text.is_empty() {
         anyhow::bail!(

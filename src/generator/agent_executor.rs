@@ -47,13 +47,16 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
     println!("{}", msg);
 
     let started = std::time::Instant::now();
-    let reply = context
+    let result = context
         .llm_client
         .prompt_without_react(prompt_sys, prompt_user)
-        .await
-        .map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
+        .await;
 
     let input_text = format!("{} {}", prompt_sys, prompt_user);
+    let (success, err) = match &result {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(format!("{}", e))),
+    };
     crate::llm::client::usage_tracker::record_from_captures(
         &context.config.llm,
         "",
@@ -62,10 +65,11 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
         started.elapsed().as_millis() as u64,
         context.config.llm.stream_enabled(),
         input_text.chars().count(),
-        reply.chars().count(),
-        true,
-        None,
+        result.as_ref().map(|r| r.chars().count()).unwrap_or(0),
+        success,
+        err,
     );
+    let reply = result.map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
 
     // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &reply);
@@ -119,14 +123,20 @@ pub async fn prompt_with_tools(
     println!("{}", msg);
 
     let started = std::time::Instant::now();
-    let reply = context
+    let result = context
         .llm_client
         .prompt(prompt_sys, prompt_user)
-        .await
-        .map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
+        .await;
 
     let input_text = format!("{} {}", prompt_sys, prompt_user);
-    let output_text = serde_json::to_string(&reply).unwrap_or_default();
+    let output_text = result
+        .as_ref()
+        .map(|r| serde_json::to_string(r).unwrap_or_default())
+        .unwrap_or_default();
+    let (success, err) = match &result {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(format!("{}", e))),
+    };
     crate::llm::client::usage_tracker::record_from_captures(
         &context.config.llm,
         "",
@@ -136,9 +146,10 @@ pub async fn prompt_with_tools(
         context.config.llm.stream_enabled(),
         input_text.chars().count(),
         output_text.chars().count(),
-        true,
-        None,
+        success,
+        err,
     );
+    let reply = result.map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
 
     // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &output_text);
@@ -186,14 +197,20 @@ where
     println!("{}", msg);
 
     let started = std::time::Instant::now();
-    let reply = context
+    let result = context
         .llm_client
         .extract::<T>(prompt_sys, prompt_user)
-        .await
-        .map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
+        .await;
 
     let input_text = format!("{} {}", prompt_sys, prompt_user);
-    let output_text = serde_json::to_string(&reply).unwrap_or_default();
+    let output_text = result
+        .as_ref()
+        .map(|r| serde_json::to_string(r).unwrap_or_default())
+        .unwrap_or_default();
+    let (success, err) = match &result {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(format!("{}", e))),
+    };
     crate::llm::client::usage_tracker::record_from_captures(
         &context.config.llm,
         "",
@@ -203,9 +220,10 @@ where
         context.config.llm.stream_enabled(),
         input_text.chars().count(),
         output_text.chars().count(),
-        true,
-        None,
+        success,
+        err,
     );
+    let reply = result.map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
 
     // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &output_text);

@@ -185,11 +185,8 @@ temperature = 0.1
 
 # Optional per-model pricing (USD per 1K tokens) used to estimate cost when
 # the provider does not report it. Keys are model names as sent on the wire.
-# [llm.pricing_table."gpt-4o-mini"]
-# input_per_1k = 0.00015
-# output_per_1k = 0.0006
-# cache_read_per_1k = 0.000075
-# cache_creation_per_1k = 0.00015
+# Inline-table form keeps following [llm] keys in scope:
+# pricing_table = { "gpt-4o-mini" = { input_per_1k = 0.00015, output_per_1k = 0.0006, cache_read_per_1k = 0.000075, cache_creation_per_1k = 0.00015 } }
 
 # Number of retry attempts for failed requests
 retry_attempts = 5

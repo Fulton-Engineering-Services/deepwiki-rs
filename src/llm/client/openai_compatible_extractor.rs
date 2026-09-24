@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
 
-use super::streaming::{collect_openai_sse, drain_to_string, with_spinner};
+use super::streaming::{collect_openai_sse_with_capture, drain_to_string, with_spinner};
 use super::usage_capture::OpenAIModel;
 
 /// JSON code block regex pattern
@@ -177,12 +177,41 @@ where
         }
 
         let response_text = if self.stream {
-            collect_openai_sse(response, &self.model).await?
+            collect_openai_sse_with_capture(
+                response,
+                &self.model,
+                format!("{}/chat/completions", self.base_url.trim_end_matches('/')),
+                self.model.clone(),
+            )
+            .await?
         } else {
             with_spinner(&self.model, "reading response", async {
-                let json: Value = response
-                    .json()
+                let status = response.status();
+                let headers: Vec<(String, String)> = response
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                    })
+                    .collect();
+                let body_text = response
+                    .text()
                     .await
+                    .context("Failed to read OpenAI-compatible API HTTP response")?;
+                crate::llm::client::usage_capture::capture_response(
+                    crate::llm::client::usage_capture::CapturedResponse {
+                        request_url: format!(
+                            "{}/chat/completions",
+                            self.base_url.trim_end_matches('/')
+                        ),
+                        request_model: Some(self.model.clone()),
+                        status: status.as_u16(),
+                        headers,
+                        body: body_text.clone(),
+                        stream: false,
+                    },
+                );
+                let json: Value = serde_json::from_str(&body_text)
                     .context("Failed to parse OpenAI-compatible API HTTP response")?;
 
                 // Extract content from OpenAI response format

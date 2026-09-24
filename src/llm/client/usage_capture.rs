@@ -17,7 +17,6 @@ use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 /// One snapshotted HTTP exchange (request meta + full response).
@@ -56,8 +55,6 @@ struct CaptureStore {
 }
 
 static CAPTURE_STORE: LazyLock<CaptureStore> = LazyLock::new(CaptureStore::default);
-static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
-pub static CAPTURE_ENABLED: AtomicU64 = AtomicU64::new(0);
 
 fn current_task_key() -> Option<tokio::task::Id> {
     if tokio::runtime::Handle::try_current().is_err() {
@@ -68,8 +65,6 @@ fn current_task_key() -> Option<tokio::task::Id> {
 
 fn store(captured: CapturedResponse) {
     if let Some(key) = current_task_key() {
-        CAPTURE_ENABLED.store(1, Ordering::Relaxed);
-        CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
         let mut map = CAPTURE_STORE.by_task.lock().unwrap();
         map.entry(key).or_default().push(captured);
     }
