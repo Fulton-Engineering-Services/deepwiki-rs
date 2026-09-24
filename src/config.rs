@@ -160,6 +160,20 @@ pub struct Config {
     /// Enable verbose logging for ReAct agents (CLI --verbose)
     #[serde(default)]
     pub verbose: bool,
+
+    /// Enable cost and usage tracking (CLI --cost-and-usage). When true, the
+    /// LiteLLM/OpenAI-compatible response (usage + cost in the body and
+    /// x-litellm-* headers) is captured, a per-call `💰` line is printed,
+    /// records are persisted to `.litho/cost_usage/`, and a markdown report
+    /// is written to the docs output folder. Default: false.
+    #[serde(default)]
+    pub cost_and_usage: bool,
+
+    /// Optional per-model pricing table (USD per 1K tokens) used to estimate
+    /// cost when the provider does not report it. Keys are model names as
+    /// sent on the wire.
+    #[serde(default)]
+    pub pricing_table: std::collections::HashMap<String, ModelPricing>,
 }
 
 /// LLM model configuration
@@ -223,23 +237,10 @@ pub struct LLMConfig {
     /// is ever parsed.
     #[serde(default)]
     pub stream: Option<bool>,
-
-    /// Enable cost and usage tracking. When true, the LiteLLM response
-    /// (usage/cost in body + x-litellm-* headers) is captured via an HTTP
-    /// middleware, surfaced in the live progress UX, persisted to
-    /// `.litho/cost_usage/`, and summarized in a markdown report in the
-    /// docs output folder. Default: false.
-    #[serde(default)]
-    pub cost_and_usage: bool,
-
-    /// Optional per-model pricing table (USD per 1K tokens) used to estimate
-    /// cost when LiteLLM-reported cost is unavailable. Keys are model names.
-    #[serde(default)]
-    pub pricing_table: std::collections::HashMap<String, ModelPricing>,
 }
 
-/// Per-model pricing used for cost estimation when the provider does not
-/// report cost directly.
+/// Per-model pricing (USD per 1K tokens) used to estimate cost when the
+/// provider does not report it directly.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ModelPricing {
     /// USD per 1K input (prompt) tokens
@@ -818,6 +819,8 @@ impl Default for Config {
             skip_documentation: false,
             force_regenerate: false,
             verbose: false,
+            cost_and_usage: false,
+            pricing_table: std::collections::HashMap::new(),
         }
     }
 }
@@ -841,8 +844,6 @@ impl Default for LLMConfig {
             max_turns: 100,
             tool_concurrency: 4,
             stream: None,
-            cost_and_usage: false,
-            pricing_table: std::collections::HashMap::new(),
         }
     }
 }
@@ -902,6 +903,21 @@ impl Default for MacroScanConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_level_cost_and_usage_and_pricing_parse_without_llm_section() {
+        // Mirrors profiles that deliberately omit [llm] (LLM settings passed
+        // via CLI flags): cost/usage and pricing are top-level Config keys.
+        let toml = r#"
+project_name = "t"
+cost_and_usage = true
+pricing_table = { "m" = { input_per_1k = 0.1, output_per_1k = 0.2 } }
+"#;
+        let c: Config = toml::from_str(toml).expect("config parses");
+        assert!(c.cost_and_usage);
+        assert_eq!(c.pricing_table["m"].input_per_1k, 0.1);
+        assert_eq!(c.pricing_table["m"].output_per_1k, 0.2);
+    }
 
     #[test]
     fn test_boundary_analysis_default_values() {

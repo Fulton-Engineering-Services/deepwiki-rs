@@ -1,6 +1,6 @@
 //! Cost & usage tracking data model and global accumulator.
 //!
-//! When `llm.cost_and_usage` is enabled, every provider call records a
+//! When `config.cost_and_usage` is enabled, every provider call records a
 //! [`UsageRecord`] into the process-wide [`UsageTracker`]. Records merge
 //! rig-reported token usage with LiteLLM-reported cost/metadata captured
 //! from the raw HTTP response (see [`super::usage_capture`]).
@@ -474,7 +474,7 @@ pub fn persist(
 /// keep the capture sink bounded) but only records when enabled.
 #[allow(clippy::too_many_arguments)]
 pub fn record_from_captures(
-    config: &crate::config::LLMConfig,
+    config: &crate::config::Config,
     model: &str,
     provider: &str,
     agent_tag: Option<String>,
@@ -488,8 +488,7 @@ pub fn record_from_captures(
     let captures = crate::llm::client::usage_capture::take_captures_for_current_task();
     if !config.cost_and_usage {
         return 0;
-    }
-    let n_captures = captures.len();
+    }    let n_captures = captures.len();
     if n_captures == 0 {
         return 0;
     }

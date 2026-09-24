@@ -300,7 +300,7 @@ impl Args {
 
         // Cost and usage tracking override (CLI flag forces it on)
         if self.cost_and_usage {
-            config.llm.cost_and_usage = true;
+            config.cost_and_usage = true;
         }
 
         // Workflow stage flags

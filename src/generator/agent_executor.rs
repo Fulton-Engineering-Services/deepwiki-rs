@@ -58,7 +58,7 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
         Err(e) => (false, Some(format!("{}", e))),
     };
     crate::llm::client::usage_tracker::record_from_captures(
-        &context.config.llm,
+        &context.config,
         "",
         &context.config.llm.provider.to_string(),
         Some(log_tag.clone()),
@@ -138,7 +138,7 @@ pub async fn prompt_with_tools(
         Err(e) => (false, Some(format!("{}", e))),
     };
     crate::llm::client::usage_tracker::record_from_captures(
-        &context.config.llm,
+        &context.config,
         "",
         &context.config.llm.provider.to_string(),
         Some(log_tag.clone()),
@@ -212,7 +212,7 @@ where
         Err(e) => (false, Some(format!("{}", e))),
     };
     crate::llm::client::usage_tracker::record_from_captures(
-        &context.config.llm,
+        &context.config,
         "",
         &context.config.llm.provider.to_string(),
         Some(log_tag.clone()),

@@ -51,29 +51,29 @@ impl CapturedResponse {
 
 #[derive(Default)]
 struct CaptureStore {
-    by_task: Mutex<HashMap<tokio::task::Id, Vec<CapturedResponse>>>,
+    // Keyed by `Some(task id)` for spawned tasks; captures made outside any
+    // spawned task (e.g. the main future under `#[tokio::main]`) share the
+    // `None` bucket. The main task is single, so its bucket stays coherent.
+    by_task: Mutex<HashMap<Option<tokio::task::Id>, Vec<CapturedResponse>>>,
 }
 
 static CAPTURE_STORE: LazyLock<CaptureStore> = LazyLock::new(CaptureStore::default);
 
 fn current_task_key() -> Option<tokio::task::Id> {
-    // `task::id()` panics when polled outside a spawned task (e.g. the main
-    // future under `#[tokio::main]`); `try_id` degrades to no-capture there.
+    // `task::id()` panics when polled outside a spawned task; `try_id` does not.
     tokio::task::try_id()
 }
 
 fn store(captured: CapturedResponse) {
-    if let Some(key) = current_task_key() {
-        let mut map = CAPTURE_STORE.by_task.lock().unwrap();
-        map.entry(key).or_default().push(captured);
-    }
+    let key = current_task_key();
+    let mut map = CAPTURE_STORE.by_task.lock().unwrap();
+    map.entry(key).or_default().push(captured);
 }
 
-/// Drain the captures recorded by the current tokio task (in issue order).
+/// Drain the captures recorded for the current execution context (in issue
+/// order): the calling task's bucket, or the shared non-task bucket.
 pub fn take_captures_for_current_task() -> Vec<CapturedResponse> {
-    let Some(key) = current_task_key() else {
-        return Vec::new();
-    };
+    let key = current_task_key();
     let mut map = CAPTURE_STORE.by_task.lock().unwrap();
     map.remove(&key).unwrap_or_default()
 }

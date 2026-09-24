@@ -88,7 +88,7 @@ pub async fn launch(c: &Config) -> Result<()> {
         memory,
     };
 
-    if context.config.llm.cost_and_usage {
+    if context.config.cost_and_usage {
         let execution_id = format!(
             "{}_{}",
             chrono::Utc::now().format("%Y%m%d_%H%M%S"),
@@ -212,7 +212,7 @@ pub async fn launch(c: &Config) -> Result<()> {
 /// Called on both the success and failure paths so partial-run spend is
 /// never discarded.
 async fn emit_cost_usage_report(context: &GeneratorContext) {
-    if !context.config.llm.cost_and_usage {
+    if !context.config.cost_and_usage {
         return;
     }
     let Some(report) =
