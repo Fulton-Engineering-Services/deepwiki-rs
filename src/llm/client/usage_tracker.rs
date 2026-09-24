@@ -445,18 +445,20 @@ fn opt_u64(v: &Option<u64>) -> String {
     v.map(|n| n.to_string()).unwrap_or_else(|| "-".into())
 }
 
-/// Persist the execution report to `<internal>/cost_usage/<id>.json` and
-/// append per-call lines to `<internal>/cost_usage/calls.jsonl`.
-pub fn persist(
+/// Append records to `<internal>/cost_usage/calls.jsonl`. Called
+/// incrementally as each funnel drains its captures, so per-call data
+/// survives interruption without waiting for the end-of-run report.
+pub fn append_records_jsonl(
     internal_path: &std::path::Path,
-    report: &ExecutionUsageReport,
+    records: &[UsageRecord],
 ) -> anyhow::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
     let dir = internal_path.join("cost_usage");
     std::fs::create_dir_all(&dir)?;
-    let json = serde_json::to_string_pretty(report)?;
-    std::fs::write(dir.join(format!("{}.json", report.execution_id)), json)?;
     let mut jsonl = String::new();
-    for c in &report.calls {
+    for c in records {
         jsonl.push_str(&serde_json::to_string(c)?);
         jsonl.push('\n');
     }
@@ -466,6 +468,25 @@ pub fn persist(
         .append(true)
         .open(dir.join("calls.jsonl"))?;
     f.write_all(jsonl.as_bytes())?;
+    Ok(())
+}
+
+/// Warn only once if incremental persistence fails, so a misconfigured
+/// `.litho` path does not spam every call.
+static JSONL_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Persist the execution report snapshot to
+/// `<internal>/cost_usage/<id>.json`. Per-call lines live in `calls.jsonl`,
+/// appended incrementally by [`append_records_jsonl`]; this snapshot is the
+/// aggregated end-of-run view.
+pub fn persist(
+    internal_path: &std::path::Path,
+    report: &ExecutionUsageReport,
+) -> anyhow::Result<()> {
+    let dir = internal_path.join("cost_usage");
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(report)?;
+    std::fs::write(dir.join(format!("{}.json", report.execution_id)), json)?;
     Ok(())
 }
 
@@ -498,7 +519,7 @@ pub fn record_from_captures(
     // they are attributed to the first capture only, and the wall time is
     // additionally spread evenly to keep per-model averages honest.
     let even_duration_ms = duration_ms / n_captures as u64;
-    let mut n = 0;
+    let mut built: Vec<UsageRecord> = Vec::with_capacity(n_captures);
     for (idx, cap) in captures.into_iter().enumerate() {
         let mut rec = crate::llm::client::usage_capture::extract_usage_record(&cap);
         if rec.model.is_empty() {
@@ -520,6 +541,10 @@ pub fn record_from_captures(
         }
         let pricing = config.pricing_table.get(&rec.model);
         rec.estimate_cost(pricing);
+        built.push(rec);
+    }
+
+    for rec in &built {
         eprintln!(
             "💰 {} · {}↑ {}↓ tok · {} · {}ms",
             if rec.model.is_empty() { "model" } else { &rec.model },
@@ -530,10 +555,17 @@ pub fn record_from_captures(
                 .unwrap_or_else(|| "cost n/a".into()),
             rec.duration_ms,
         );
-        UsageTracker::global().record(rec);
-        n += 1;
+        UsageTracker::global().record(rec.clone());
     }
-    n
+
+    // Durable per-call lines, written as each funnel drains — an interrupted
+    // run keeps everything recorded so far.
+    if let Err(e) = append_records_jsonl(&config.internal_path, &built)
+        && !JSONL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!("⚠️  Warning: failed to append cost/usage records to {}: {}", config.internal_path.join("cost_usage/calls.jsonl").display(), e);
+    }
+    built.len()
 }
 
 #[cfg(test)]
@@ -583,5 +615,70 @@ mod tests {
         let md = render_markdown_report(&rep);
         assert!(md.contains("Cost & Usage Report"));
         assert!(md.contains("Total cost | $0.0100"));
+    }
+
+    #[tokio::test]
+    async fn drains_split_durations_and_append_jsonl_incrementally() {
+        use crate::llm::client::usage_capture::{capture_response, CapturedResponse};
+
+        let dir = std::env::temp_dir().join(format!(
+            "litho-cu-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let caps = vec![
+            CapturedResponse {
+                request_url: "http://gw/v1/chat/completions".into(),
+                request_model: Some("m".into()),
+                status: 200,
+                headers: vec![],
+                body: r#"{"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cost":0.01}}"#.into(),
+                stream: false,
+            },
+            CapturedResponse {
+                request_url: "http://gw/v1/chat/completions".into(),
+                request_model: Some("m".into()),
+                status: 200,
+                headers: vec![],
+                body: r#"{"usage":{"prompt_tokens":110,"completion_tokens":50,"total_tokens":160,"cost":0.02}}"#.into(),
+                stream: false,
+            },
+        ];
+        for c in caps {
+            capture_response(c);
+        }
+
+        let mut cfg = crate::config::Config::default();
+        cfg.cost_and_usage = true;
+        cfg.internal_path = dir.clone();
+        UsageTracker::global().begin_execution(
+            "test-incr".into(),
+            "p".into(),
+            "http://x".into(),
+            "openai".into(),
+        );
+
+        let n = record_from_captures(
+            &cfg, "", "openai", Some("tag".into()), 200, false, 10, 5, true, None,
+        );
+        assert_eq!(n, 2);
+
+        // JSONL is written incrementally, before the run ends.
+        let jsonl =
+            std::fs::read_to_string(dir.join("cost_usage/calls.jsonl")).expect("jsonl written");
+        assert_eq!(jsonl.lines().count(), 2);
+        assert!(jsonl.contains("\"execution_id\":\"test-incr\""));
+
+        // Duration split: first record carries the remainder, second the even
+        // share (funnel wall time 200ms across 2 captures).
+        let lines: Vec<UsageRecord> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0].duration_ms, 100);
+        assert_eq!(lines[1].duration_ms, 100);
+        assert_eq!(lines[0].prompt_chars, 10);
+        assert_eq!(lines[1].prompt_chars, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
