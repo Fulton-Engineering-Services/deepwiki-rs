@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::generator::compose::DocumentationComposer;
-use crate::generator::outlet::{DiskOutlet, DocTree, Outlet, SummaryOutlet};
+use crate::generator::outlet::{AgentContentOutlet, DiskOutlet, DocTree, Outlet, SummaryOutlet};
 use crate::{
     cache::CacheManager,
     config::Config,
@@ -181,6 +181,13 @@ pub async fn launch(c: &Config) -> Result<()> {
             // Generate and save summary report
             let summary_outlet = SummaryOutlet::new();
             summary_outlet.save(&context).await?;
+
+            // Generate the agent-focused content set (written last so it
+            // survives DiskOutlet's output-directory wipe at the start of save).
+            if context.config.agent_content {
+                let agent_outlet = AgentContentOutlet::from_context(&context);
+                agent_outlet.save(&context).await?;
+            }
 
             let output_time = output_start.elapsed().as_secs_f64();
             context

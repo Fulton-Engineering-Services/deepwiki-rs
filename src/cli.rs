@@ -127,6 +127,15 @@ pub struct Args {
     /// .litho/cost_usage/ records and a markdown report to the docs output)
     #[arg(long)]
     pub cost_and_usage: bool,
+
+    /// Disable the agent-focused content set (written to
+    /// <output>/.agent-content/). On by default.
+    #[arg(long)]
+    pub no_agent_content: bool,
+
+    /// Disable Mermaid diagram files within the agent content set
+    #[arg(long)]
+    pub no_agent_content_diagrams: bool,
 }
 
 /// CLI subcommands
@@ -301,6 +310,14 @@ impl Args {
         // Cost and usage tracking override (CLI flag forces it on)
         if self.cost_and_usage {
             config.cost_and_usage = true;
+        }
+
+        // Agent content set (on by default; --no-agent-content disables)
+        if self.no_agent_content {
+            config.agent_content = false;
+        }
+        if self.no_agent_content_diagrams {
+            config.agent_content_diagrams = false;
         }
 
         // Workflow stage flags

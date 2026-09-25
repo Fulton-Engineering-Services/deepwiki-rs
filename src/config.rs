@@ -169,6 +169,17 @@ pub struct Config {
     #[serde(default)]
     pub cost_and_usage: bool,
 
+    /// Emit the agent-focused content set under `<output_path>/.agent-content/`
+    /// (CLI --agent-content / --no-agent-content). Short, interlinked pages that
+    /// map the analysis and link straight into the codebase. Default: true.
+    #[serde(default = "default_true")]
+    pub agent_content: bool,
+
+    /// Emit dedicated Mermaid diagram files within the agent content set
+    /// (CLI --agent-content-diagrams / --no-agent-content-diagrams). Default: true.
+    #[serde(default = "default_true")]
+    pub agent_content_diagrams: bool,
+
     /// Optional per-model pricing table (USD per 1K tokens) used to estimate
     /// cost when the provider does not report it. Keys are model names as
     /// sent on the wire.
@@ -833,6 +844,8 @@ impl Default for Config {
             force_regenerate: false,
             verbose: false,
             cost_and_usage: false,
+            agent_content: true,
+            agent_content_diagrams: true,
             pricing_table: std::collections::HashMap::new(),
             cost_usage_dir: default_cost_usage_dir(),
         }

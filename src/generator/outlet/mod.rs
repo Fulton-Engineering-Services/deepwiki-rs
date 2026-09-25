@@ -8,9 +8,11 @@ use std::fs;
 pub mod summary_generator;
 pub mod summary_outlet;
 pub mod fixer;
+pub mod agent;
 
 pub use summary_outlet::SummaryOutlet;
 pub use fixer::MermaidFixer;
+pub use agent::AgentContentOutlet;
 
 pub trait Outlet {
     async fn save(&self, context: &GeneratorContext) -> Result<()>;
