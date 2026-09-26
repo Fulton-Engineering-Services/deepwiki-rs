@@ -165,6 +165,7 @@ fn kind_label(kind: PageKind) -> &'static str {
         PageKind::Index => "index",
         PageKind::Topic => "topic",
         PageKind::Area => "area",
+        PageKind::Dir => "directory",
         PageKind::Module => "module",
         PageKind::File => "file",
     }

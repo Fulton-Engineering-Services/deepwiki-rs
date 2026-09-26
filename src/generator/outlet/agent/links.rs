@@ -113,6 +113,88 @@ impl SlugRegistry {
     }
 }
 
+/// Clamp a single path component to `max` bytes without splitting a UTF-8 char.
+pub fn clamp_bytes(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_string()
+}
+
+/// Clamp a single path component to the common filesystem NAME_MAX (255 bytes).
+pub fn clamp_component(name: &str) -> String {
+    clamp_bytes(name, 255)
+}
+
+/// Append the Markdown page suffix to a source basename, preserving its real
+/// name for human review (`ApiKeyService.java` -> `ApiKeyService.java.md`).
+///
+/// A source file literally named `index` would otherwise produce `index.md` and
+/// shadow a directory hub page, so it becomes `index-file.md`. The component is
+/// clamped below the filesystem NAME_MAX, leaving room for the `.md` suffix.
+pub fn verbatim_leaf(basename: &str) -> String {
+    let trimmed = basename.trim();
+    let base = if trimmed.is_empty() { "file" } else { trimmed };
+    // Reserve room for ".md" (3 bytes) under NAME_MAX.
+    let base = clamp_bytes(base, 252);
+    let candidate = format!("{}.md", base);
+    if candidate.eq_ignore_ascii_case("index.md") {
+        format!("{}-file.md", base)
+    } else {
+        candidate
+    }
+}
+
+/// Exact-name uniqueness guard for one output directory.
+///
+/// Unlike [`SlugRegistry`] this preserves the desired name verbatim (source file
+/// and directory names must stay recognizable) and only appends `-2`, `-3`, ...
+/// when a name is already taken. Comparison is case-insensitive so it also
+/// guards case-insensitive filesystems (macOS APFS).
+#[derive(Debug, Default)]
+pub struct NameRegistry {
+    used: std::collections::HashMap<String, usize>,
+}
+
+impl NameRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark `name` as taken without returning a value (used to reserve
+    /// `index.md` for the directory hub page).
+    pub fn reserve(&mut self, name: &str) {
+        self.used.entry(name.to_lowercase()).or_insert(1);
+    }
+
+    /// Allocate a collision-free name in this directory's namespace.
+    pub fn allocate(&mut self, desired: &str) -> String {
+        let key = desired.to_lowercase();
+        let counter = {
+            let c = self.used.entry(key).or_insert(0);
+            *c += 1;
+            *c
+        };
+        let name = if counter == 1 {
+            desired.to_string()
+        } else {
+            match desired.strip_suffix(".md") {
+                Some(stem) => format!("{}-{}.md", stem, counter),
+                None => format!("{}-{}", desired, counter),
+            }
+        };
+        // Record the generated name too, so a later desired name that equals it
+        // (e.g. a literal `foo-2` after a collision produced `foo-2`) cannot
+        // alias to the same output path.
+        self.used.entry(name.to_lowercase()).or_insert(1);
+        name
+    }
+}
+
 /// Escape text for safe inclusion inside a double-quoted Mermaid node label.
 ///
 /// Mermaid labels are quoted with `"`; embedded quotes would terminate the label
@@ -201,5 +283,44 @@ mod tests {
     #[test]
     fn escape_label_removes_quotes() {
         assert_eq!(escape_mermaid_label(r#"Say "hi""#), "Say 'hi'");
+    }
+
+    #[test]
+    fn verbatim_leaf_preserves_name_and_avoids_index() {
+        assert_eq!(verbatim_leaf("ApiKeyService.java"), "ApiKeyService.java.md");
+        assert_eq!(verbatim_leaf("README.md"), "README.md.md");
+        assert_eq!(verbatim_leaf("index"), "index-file.md");
+        assert_eq!(verbatim_leaf(""), "file.md");
+    }
+
+    #[test]
+    fn name_registry_is_case_insensitive() {
+        let mut reg = NameRegistry::new();
+        reg.reserve("index.md");
+        assert_eq!(reg.allocate("ApiKey.java.md"), "ApiKey.java.md");
+        // Same name different case collides on case-insensitive filesystems.
+        assert_eq!(reg.allocate("apikey.java.md"), "apikey.java-2.md");
+        // Reserved index.md cascades to -2.
+        assert_eq!(reg.allocate("index.md"), "index-2.md");
+    }
+
+    #[test]
+    fn name_registry_does_not_alias_generated_names() {
+        let mut reg = NameRegistry::new();
+        assert_eq!(reg.allocate("Foo"), "Foo");
+        // Case-insensitive collision on "Foo".
+        assert_eq!(reg.allocate("foo"), "foo-2");
+        // A literal "foo-2" must not reuse the name just generated.
+        assert_eq!(reg.allocate("foo-2"), "foo-2-2");
+    }
+
+    #[test]
+    fn clamp_component_respects_name_max() {
+        let long = "a".repeat(300);
+        assert_eq!(clamp_component(&long).len(), 255);
+        // Verbatim leaf keeps room for the .md suffix.
+        let leaf = verbatim_leaf(&long);
+        assert!(leaf.len() <= 255);
+        assert!(leaf.ends_with(".md"));
     }
 }

@@ -9,11 +9,11 @@
 //! they were analyzed under and tightly-scoped per-file pages sit at the leaves.
 
 use crate::generator::outlet::agent::diagrams;
-use crate::generator::outlet::agent::links::slugify;
+use crate::generator::outlet::agent::links::{NameRegistry, clamp_component, slugify, verbatim_leaf};
 use crate::generator::research::area_tree::{AreaNode, AreaTree};
 use crate::generator::research::types::{
-    BoundaryAnalysisReport, DatabaseOverviewReport, DomainModulesReport, KeyModuleReport,
-    SystemContextReport,
+    BoundaryAnalysisReport, BusinessFlow, DatabaseOverviewReport, DomainModulesReport,
+    KeyModuleReport, SystemContextReport,
 };
 use crate::types::FileInsight;
 use std::collections::HashMap;
@@ -36,8 +36,6 @@ pub struct AgentOptions {
     pub max_list_items: usize,
     /// Cap on characters for any single prose field (summary, descriptions).
     pub max_desc_chars: usize,
-    /// Cap on per-file pages emitted beneath a single area.
-    pub max_file_pages: usize,
 }
 
 impl Default for AgentOptions {
@@ -46,7 +44,6 @@ impl Default for AgentOptions {
             diagrams: true,
             max_list_items: 8,
             max_desc_chars: 280,
-            max_file_pages: 40,
         }
     }
 }
@@ -99,6 +96,7 @@ pub enum PageKind {
     Index,
     Topic,
     Area,
+    Dir,
     Module,
     File,
 }
@@ -163,16 +161,22 @@ struct Frame {
     file_slots: Vec<FileEntry>,
 }
 
-/// A tightly-scoped per-file page candidate.
+/// A tightly-scoped per-file page candidate, carrying its mirrored location.
 #[derive(Debug, Clone)]
 struct FileEntry {
+    /// Project-relative source path (used for the Source link).
     path: String,
+    /// Verbatim source basename (used as the leaf page name stem).
     name: String,
+    /// Source directory segments relative to the matched area root, i.e. the
+    /// folder chain the page mirrors under `files/` (excludes the basename).
+    mirror_dirs: Vec<String>,
+    /// The matched area root this file's mirror is relative to.
+    source_root: String,
     summary: String,
     responsibilities: Vec<String>,
     interfaces: Vec<String>,
     dependencies: Vec<String>,
-    importance: f64,
 }
 
 /// Build the whole agent site from a research bundle.
@@ -226,8 +230,17 @@ pub fn build_site(bundle: &ResearchBundle, opts: &AgentOptions) -> AgentSite {
     }
 
     // --- Assign files to frames -------------------------------------------
-    for entry in file_entries {
-        let frame = deepest_frame_for(&frames, &entry.path).unwrap_or(0);
+    for mut entry in file_entries {
+        let (frame, root) = match deepest_frame_for(&frames, &entry.path) {
+            Some((idx, root)) => (idx, root.to_string()),
+            None => (0, ".".to_string()),
+        };
+        let segments = mirror_segments(&entry.path, &root);
+        if let Some(last) = segments.last() {
+            entry.name = last.clone();
+        }
+        entry.mirror_dirs = segments[..segments.len().saturating_sub(1)].to_vec();
+        entry.source_root = root;
         frames[frame].file_slots.push(entry);
     }
 
@@ -235,7 +248,8 @@ pub fn build_site(bundle: &ResearchBundle, opts: &AgentOptions) -> AgentSite {
     emit_root_and_topics(&mut site, bundle, &frames, opts);
 
     // --- Emit area tree pages recursively ---------------------------------
-    emit_area(&mut site, &frames, 0, opts, &[]);
+    let home = NavLink { label: "Home".to_string(), target: ROOT_INDEX.to_string() };
+    emit_area(&mut site, &frames, 0, opts, std::slice::from_ref(&home));
 
     site
 }
@@ -298,7 +312,7 @@ fn resolve_module_frame(frames: &[Frame], owned: &OwnedKeyModule) -> usize {
     // Fall back to the deepest area owning any of the module's files.
     let mut best: Option<usize> = None;
     for path in &owned.report.associated_files {
-        if let Some(idx) = deepest_frame_for(frames, path) {
+        if let Some((idx, _)) = deepest_frame_for(frames, path) {
             best = Some(match best {
                 Some(b) if frames[b].depth >= frames[idx].depth => b,
                 _ => idx,
@@ -308,21 +322,40 @@ fn resolve_module_frame(frames: &[Frame], owned: &OwnedKeyModule) -> usize {
     best.unwrap_or(0)
 }
 
-/// Find the deepest frame whose root paths contain `path`.
-fn deepest_frame_for(frames: &[Frame], path: &str) -> Option<usize> {
+/// Find the deepest frame whose root paths contain `path`, returning both the
+/// frame index and the matched root string (the basis for mirroring).
+fn deepest_frame_for<'a>(frames: &'a [Frame], path: &str) -> Option<(usize, &'a str)> {
     let norm = path.replace('\\', "/");
-    let mut best: Option<(usize, usize)> = None;
+    let mut best: Option<(usize, &str)> = None;
     for (idx, frame) in frames.iter().enumerate() {
         for root in &frame.root_paths {
             if path_under(&norm, root) {
                 let score = root.len();
-                if best.map(|(_, s)| score > s).unwrap_or(true) {
-                    best = Some((idx, score));
+                if best.map(|(_, r)| score > r.len()).unwrap_or(true) {
+                    best = Some((idx, root.as_str()));
                 }
             }
         }
     }
-    best.map(|(idx, _)| idx)
+    best
+}
+
+/// Split a project-relative source path into its segments relative to the
+/// matched area root. The final segment is the basename.
+fn mirror_segments(path: &str, matched_root: &str) -> Vec<String> {
+    let norm = path.replace('\\', "/");
+    let rel = if matched_root == "." {
+        norm.trim_start_matches("./").to_string()
+    } else {
+        norm.strip_prefix(matched_root)
+            .unwrap_or(&norm)
+            .trim_start_matches('/')
+            .to_string()
+    };
+    rel.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn path_under(path: &str, root: &str) -> bool {
@@ -368,11 +401,12 @@ fn collect_file_entries(bundle: &ResearchBundle) -> Vec<FileEntry> {
             FileEntry {
                 path,
                 name,
+                mirror_dirs: Vec::new(),
+                source_root: String::new(),
                 summary: fi.summary.clone(),
                 responsibilities: fi.responsibilities.clone(),
                 interfaces: fi.interfaces.iter().map(|i| i.name.clone()).collect(),
                 dependencies: fi.dependencies.iter().map(|d| d.name.clone()).collect(),
-                importance: fi.importance_score,
             },
         );
     }
@@ -395,11 +429,12 @@ fn collect_file_entries(bundle: &ResearchBundle) -> Vec<FileEntry> {
                 FileEntry {
                     path,
                     name,
+                    mirror_dirs: Vec::new(),
+                    source_root: String::new(),
                     summary: String::new(),
                     responsibilities: Vec::new(),
                     interfaces: Vec::new(),
                     dependencies: Vec::new(),
-                    importance: 0.0,
                 },
             );
         }
@@ -501,6 +536,17 @@ fn emit_root_and_topics(
     ];
     if !area_links.is_empty() {
         nav_groups.push(NavGroup { heading: "Areas".to_string(), links: area_links });
+    }
+    // Root-frame modules and files (those not claimed by any area) hang off the
+    // root map directly so they are not orphaned.
+    let home_crumb = NavLink { label: "Home".to_string(), target: ROOT_INDEX.to_string() };
+    let root_module_links = emit_module_links(site, &frames[0], opts);
+    if !root_module_links.is_empty() {
+        nav_groups.push(NavGroup { heading: "Modules".to_string(), links: root_module_links });
+    }
+    let root_file_links = emit_file_tree(site, &frames[0], std::slice::from_ref(&home_crumb), opts);
+    if !root_file_links.is_empty() {
+        nav_groups.push(NavGroup { heading: "Files".to_string(), links: root_file_links });
     }
     if !root_diagrams.is_empty() {
         nav_groups.push(NavGroup { heading: "Diagrams".to_string(), links: root_diagrams });
@@ -635,23 +681,9 @@ fn emit_topics(site: &mut AgentSite, bundle: &ResearchBundle, opts: &AgentOption
     let mut diagram_links = Vec::new();
     let mut detail_blocks = Vec::new();
     if let Some(dm) = &bundle.domain_modules {
-        for flow in &dm.business_flows {
-            if !opts.diagrams {
-                continue;
-            }
-            if let Some((_, body)) = diagrams::workflow_diagrams(std::slice::from_ref(flow)).into_iter().next() {
-                let slug = slugify(&flow.name);
-                let rel = format!("topics/diagrams/workflow-{}.md", slug);
-                site.diagrams.push(DiagramFile {
-                    rel_path: rel.clone(),
-                    title: format!("Workflow — {}", flow.name),
-                    caption: cap(&flow.description, opts.max_desc_chars),
-                    body,
-                    owner: NavLink { label: "Workflow".into(), target: "topics/workflow.md".into() },
-                });
-                diagram_links.push(NavLink { label: flow.name.clone(), target: rel });
-            }
-        }
+        // Workflow diagrams are nested by domain; the topic page links the
+        // domain hubs rather than all 80+ flows.
+        diagram_links.extend(emit_workflows(site, bundle, opts));
         if !dm.business_flows.is_empty() {
             detail_blocks.push(DetailBlock {
                 heading: "Key flows".into(),
@@ -773,6 +805,9 @@ fn emit_topics(site: &mut AgentSite, bundle: &ResearchBundle, opts: &AgentOption
 }
 
 /// Recursively emit an area page plus its modules, files, and diagram.
+///
+/// The root frame (idx 0) is emitted by `emit_root_and_topics`; here it only
+/// contributes its children's breadcrumbs.
 fn emit_area(
     site: &mut AgentSite,
     frames: &[Frame],
@@ -789,90 +824,69 @@ fn emit_area(
 
     // Breadcrumbs: ancestors + this area.
     let mut breadcrumbs: Vec<NavLink> = ancestor_crumbs.to_vec();
+    let mut child_crumbs = ancestor_crumbs.to_vec();
     if idx != 0 {
-        breadcrumbs.push(NavLink { label: frame.name.clone(), target: index_rel.clone() });
+        let own = NavLink { label: frame.name.clone(), target: index_rel.clone() };
+        breadcrumbs.push(own.clone());
+        child_crumbs.push(own);
     }
 
-    // Area structure diagram (children + modules).
-    let mut diagram_links = Vec::new();
-    if opts.diagrams {
-        let module_names: Vec<String> = frame
-            .module_slots
-            .iter()
-            .map(|m| m.report.domain_name.clone())
-            .collect();
-        if let Some(body) = diagrams::area_structure_diagram(&AreaNode {
-            id: frame.id.clone(),
-            name: frame.name.clone(),
-            description: frame.description.clone(),
-            root_paths: frame.root_paths.iter().map(PathBuf::from).collect(),
-            children: Vec::new(),
-            dossier_paths: Vec::new(),
-        }, &module_names)
-        {
-            let rel = if frame.rel_dir.is_empty() {
-                "diagrams/area-root.md".to_string()
-            } else {
-                format!("{}/diagrams/{}.md", frame.rel_dir, slugify(&frame.name))
-            };
-            site.diagrams.push(DiagramFile {
-                rel_path: rel.clone(),
-                title: format!("{} — Structure", frame.name),
-                caption: "Sub-areas and modules within this area.".into(),
-                body,
-                owner: NavLink { label: frame.name.clone(), target: index_rel.clone() },
-            });
-            diagram_links.push(NavLink { label: "Structure".into(), target: rel });
+    if idx != 0 {
+        // Area structure diagram (children + modules).
+        let mut diagram_links = Vec::new();
+        if opts.diagrams {
+            let module_names: Vec<String> = frame
+                .module_slots
+                .iter()
+                .map(|m| m.report.domain_name.clone())
+                .collect();
+            if let Some(body) = diagrams::area_structure_diagram(&AreaNode {
+                id: frame.id.clone(),
+                name: frame.name.clone(),
+                description: frame.description.clone(),
+                root_paths: frame.root_paths.iter().map(PathBuf::from).collect(),
+                children: Vec::new(),
+                dossier_paths: Vec::new(),
+            }, &module_names)
+            {
+                let rel = format!("{}/diagrams/{}.md", frame.rel_dir, slugify(&frame.name));
+                site.diagrams.push(DiagramFile {
+                    rel_path: rel.clone(),
+                    title: format!("{} — Structure", frame.name),
+                    caption: "Sub-areas and modules within this area.".into(),
+                    body,
+                    owner: NavLink { label: frame.name.clone(), target: index_rel.clone() },
+                });
+                diagram_links.push(NavLink { label: "Structure".into(), target: rel });
+            }
         }
-    }
 
-    // Sub-area nav group.
-    let mut nav_groups: Vec<NavGroup> = Vec::new();
-    let child_links: Vec<NavLink> = frame
-        .children
-        .iter()
-        .map(|&c| NavLink {
-            label: frames[c].name.clone(),
-            target: format!("{}/index.md", frames[c].rel_dir),
-        })
-        .collect();
-    if !child_links.is_empty() {
-        nav_groups.push(NavGroup { heading: "Sub-areas".into(), links: child_links });
-    }
+        // Sub-area nav group.
+        let mut nav_groups: Vec<NavGroup> = Vec::new();
+        let child_links: Vec<NavLink> = frame
+            .children
+            .iter()
+            .map(|&c| NavLink {
+                label: frames[c].name.clone(),
+                target: format!("{}/index.md", frames[c].rel_dir),
+            })
+            .collect();
+        if !child_links.is_empty() {
+            nav_groups.push(NavGroup { heading: "Sub-areas".into(), links: child_links });
+        }
 
-    // Module pages + nav.
-    let mut module_links: Vec<NavLink> = Vec::new();
-    for owned in &frame.module_slots {
-        let rel = emit_module(site, frame, owned, opts);
-        module_links.push(NavLink {
-            label: if owned.report.module_name.is_empty() {
-                owned.report.domain_name.clone()
-            } else {
-                owned.report.module_name.clone()
-            },
-            target: rel,
-        });
-    }
-    if !module_links.is_empty() {
-        nav_groups.push(NavGroup { heading: "Modules".into(), links: module_links });
-    }
+        // Module folder pages + nav.
+        let module_links = emit_module_links(site, frame, opts);
+        if !module_links.is_empty() {
+            nav_groups.push(NavGroup { heading: "Modules".into(), links: module_links });
+        }
 
-    // File pages + nav (capped).
-    let mut file_links: Vec<NavLink> = Vec::new();
-    let mut sorted_files = frame.file_slots.clone();
-    sorted_files.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
-    for entry in sorted_files.iter().take(opts.max_file_pages) {
-        let rel = emit_file(site, frame, entry, opts);
-        file_links.push(NavLink { label: entry.name.clone(), target: rel });
-    }
-    if !file_links.is_empty() {
-        nav_groups.push(NavGroup { heading: "Files".into(), links: file_links });
-    }
+        // Nested file tree + top-level nav.
+        let file_links = emit_file_tree(site, frame, &breadcrumbs, opts);
+        if !file_links.is_empty() {
+            nav_groups.push(NavGroup { heading: "Files".into(), links: file_links });
+        }
 
-    // Source grounding: the area's root paths (folders).
-    let source_paths = frame.root_paths.clone();
-
-    if idx != 0 {
         site.pages.push(AgentPage {
             rel_path: index_rel.clone(),
             kind: PageKind::Area,
@@ -880,47 +894,67 @@ fn emit_area(
             summary: cap(&frame.description, opts.max_desc_chars),
             breadcrumbs,
             nav_groups,
-            source_paths,
+            source_paths: frame.root_paths.clone(),
             diagram_links,
             detail_blocks: Vec::new(),
             notes: Vec::new(),
         });
     }
 
-    // Recurse into children.
-    let mut child_crumbs = ancestor_crumbs.to_vec();
-    if idx != 0 {
-        child_crumbs.push(NavLink { label: frame.name.clone(), target: index_rel.clone() });
-    }
     for &c in &frame.children {
         emit_area(site, frames, c, opts, &child_crumbs);
     }
 }
 
-/// Emit one module page (with its flowchart/sequence diagrams).
+/// Emit every module of a frame into its own folder and return nav links,
+/// sorted by display name.
+fn emit_module_links(site: &mut AgentSite, frame: &Frame, opts: &AgentOptions) -> Vec<NavLink> {
+    let mut reg = NameRegistry::new();
+    let mut links: Vec<NavLink> = frame
+        .module_slots
+        .iter()
+        .map(|owned| {
+            let rel = emit_module(site, frame, owned, opts, &mut reg);
+            NavLink {
+                label: if owned.report.module_name.is_empty() {
+                    owned.report.domain_name.clone()
+                } else {
+                    owned.report.module_name.clone()
+                },
+                target: rel,
+            }
+        })
+        .collect();
+    links.sort_by_key(|l| l.label.to_lowercase());
+    links
+}
+
+/// Emit one module folder (`modules/<slug>/index.md` plus its flowchart and
+/// sequence diagrams as siblings). Returns the module page path.
 fn emit_module(
     site: &mut AgentSite,
     frame: &Frame,
     owned: &OwnedKeyModule,
     opts: &AgentOptions,
+    reg: &mut NameRegistry,
 ) -> String {
     let report = &owned.report;
-    let slug = slugify(if report.module_name.is_empty() {
+    let slug = reg.allocate(&slugify(if report.module_name.is_empty() {
         &report.domain_name
     } else {
         &report.module_name
-    });
+    }));
     let rel_dir = if frame.rel_dir.is_empty() {
-        "modules".to_string()
+        format!("modules/{}", slug)
     } else {
-        format!("{}/modules", frame.rel_dir)
+        format!("{}/modules/{}", frame.rel_dir, slug)
     };
-    let rel = format!("{}/{}.md", rel_dir, slug);
+    let rel = format!("{}/index.md", rel_dir);
 
     let mut diagram_links = Vec::new();
     if opts.diagrams {
         if !report.flowchart_mermaid.trim().is_empty() {
-            let drel = format!("{}/diagrams/{}.flowchart.md", rel_dir, slug);
+            let drel = format!("{}/flowchart.md", rel_dir);
             site.diagrams.push(DiagramFile {
                 rel_path: drel.clone(),
                 title: format!("{} — Flow", report.domain_name),
@@ -931,7 +965,7 @@ fn emit_module(
             diagram_links.push(NavLink { label: "Flowchart".into(), target: drel });
         }
         if !report.sequence_diagram_mermaid.trim().is_empty() {
-            let drel = format!("{}/diagrams/{}.sequence.md", rel_dir, slug);
+            let drel = format!("{}/sequence.md", rel_dir);
             site.diagrams.push(DiagramFile {
                 rel_path: drel.clone(),
                 title: format!("{} — Sequence", report.domain_name),
@@ -996,16 +1030,197 @@ fn module_crumbs(frame: &Frame, module_name: &str) -> Vec<NavLink> {
     crumbs
 }
 
-/// Emit one tightly-scoped per-file page.
-fn emit_file(site: &mut AgentSite, frame: &Frame, entry: &FileEntry, opts: &AgentOptions) -> String {
-    let slug = slugify(&entry.name);
-    let rel_dir = if frame.rel_dir.is_empty() {
+/// A directory node in the mirrored source tree under an area's `files/`.
+#[derive(Default)]
+struct DirTrie {
+    dirs: std::collections::BTreeMap<String, DirTrie>,
+    files: Vec<FileEntry>,
+}
+
+/// Build the mirrored file tree for a frame and emit its hub + leaf pages,
+/// returning the top-level nav links (folders first, then files).
+fn emit_file_tree(
+    site: &mut AgentSite,
+    frame: &Frame,
+    base_crumbs: &[NavLink],
+    opts: &AgentOptions,
+) -> Vec<NavLink> {
+    if frame.file_slots.is_empty() {
+        return Vec::new();
+    }
+    let files_rel = if frame.rel_dir.is_empty() {
         "files".to_string()
     } else {
         format!("{}/files", frame.rel_dir)
     };
-    let rel = format!("{}/{}.md", rel_dir, slug);
+    let mut root = DirTrie::default();
+    for entry in &frame.file_slots {
+        let mut node = &mut root;
+        for dir in &entry.mirror_dirs {
+            node = node.dirs.entry(dir.clone()).or_default();
+        }
+        node.files.push(entry.clone());
+    }
+    let mut top = Vec::new();
+    emit_dir(site, &root, &files_rel, "files", &[], base_crumbs, true, opts, &mut top);
+    top
+}
 
+/// Recursively emit one mirrored directory: its hub page, child directories,
+/// and file pages. `prefix` holds the raw source-dir segments from the tree
+/// root down to this node (used to reconstruct the hub's Source link).
+#[allow(clippy::too_many_arguments)]
+fn emit_dir(
+    site: &mut AgentSite,
+    node: &DirTrie,
+    cur_rel: &str,
+    display: &str,
+    prefix: &[String],
+    ancestor_crumbs: &[NavLink],
+    is_root: bool,
+    opts: &AgentOptions,
+    top_out: &mut Vec<NavLink>,
+) {
+    let mut reg = NameRegistry::new();
+    reg.reserve("index.md");
+
+    // Reserve directory names first so a file leaf never shadows a folder.
+    let mut child_dirs: Vec<(String, String, &DirTrie)> = Vec::new();
+    for (raw, child) in &node.dirs {
+        let alloc = reg.allocate(&clamp_component(raw));
+        child_dirs.push((raw.clone(), alloc, child));
+    }
+
+    // Allocate verbatim leaf names.
+    let mut sorted = node.files.clone();
+    sorted.sort_by_key(|e| e.name.to_lowercase());
+    let mut leaves: Vec<(String, FileEntry)> = sorted
+        .into_iter()
+        .map(|entry| {
+            let leaf = reg.allocate(&verbatim_leaf(&entry.name));
+            (leaf, entry)
+        })
+        .collect();
+    leaves.sort_by_key(|(name, _)| name.to_lowercase());
+
+    let hub_rel = format!("{}/index.md", cur_rel);
+    let mut crumbs = ancestor_crumbs.to_vec();
+    crumbs.push(NavLink { label: display.to_string(), target: hub_rel.clone() });
+
+    let folder_links: Vec<NavLink> = child_dirs
+        .iter()
+        .map(|(_, alloc, _)| NavLink {
+            label: alloc.clone(),
+            target: format!("{}/{}/index.md", cur_rel, alloc),
+        })
+        .collect();
+    let leaf_links: Vec<NavLink> = leaves
+        .iter()
+        .map(|(leaf, entry)| NavLink {
+            label: entry.name.clone(),
+            target: format!("{}/{}", cur_rel, leaf),
+        })
+        .collect();
+
+    // Hub Source link: the real folder = first descendant file's matched root
+    // plus this node's raw source-dir segments. The project root (".") has no
+    // meaningful link, so it is omitted.
+    let source_paths = match first_file(node) {
+        Some(f) => {
+            let mut segs = vec![f.source_root.clone()];
+            segs.extend(prefix.iter().cloned());
+            let joined = segs.join("/");
+            if joined.trim_matches('/') == "." {
+                Vec::new()
+            } else {
+                vec![joined]
+            }
+        }
+        None => Vec::new(),
+    };
+
+    let mut nav_groups = Vec::new();
+    if !folder_links.is_empty() {
+        nav_groups.push(NavGroup { heading: "Folders".into(), links: folder_links.clone() });
+    }
+    if !leaf_links.is_empty() {
+        nav_groups.push(NavGroup { heading: "Files".into(), links: leaf_links.clone() });
+    }
+
+    site.pages.push(AgentPage {
+        rel_path: hub_rel,
+        kind: PageKind::Dir,
+        title: display.to_string(),
+        summary: format!(
+            "{} file(s) across {} folder(s).",
+            count_files(node),
+            count_dirs(node)
+        ),
+        breadcrumbs: crumbs.clone(),
+        nav_groups,
+        source_paths,
+        diagram_links: Vec::new(),
+        detail_blocks: Vec::new(),
+        notes: Vec::new(),
+    });
+
+    if is_root {
+        top_out.extend(folder_links);
+        top_out.extend(leaf_links);
+    }
+
+    for (raw, alloc, child) in &child_dirs {
+        let mut child_prefix = prefix.to_vec();
+        child_prefix.push(raw.clone());
+        emit_dir(
+            site,
+            child,
+            &format!("{}/{}", cur_rel, alloc),
+            alloc,
+            &child_prefix,
+            &crumbs,
+            false,
+            opts,
+            top_out,
+        );
+    }
+
+    for (leaf, entry) in &leaves {
+        let rel = format!("{}/{}", cur_rel, leaf);
+        let mut leaf_crumbs = crumbs.clone();
+        leaf_crumbs.push(NavLink { label: entry.name.clone(), target: rel.clone() });
+        emit_leaf(site, entry, rel, leaf_crumbs, opts);
+    }
+}
+
+/// First file in the subtree (DFS) — used to derive a directory's Source link.
+/// Picks the lexicographically smallest path so the choice is deterministic
+/// regardless of the (HashMap-derived) insertion order of `file_slots`.
+fn first_file(node: &DirTrie) -> Option<&FileEntry> {
+    if let Some(f) = node.files.iter().min_by(|a, b| a.path.cmp(&b.path)) {
+        return Some(f);
+    }
+    node.dirs.values().find_map(first_file)
+}
+
+/// Total files in a subtree.
+fn count_files(node: &DirTrie) -> usize {
+    node.files.len() + node.dirs.values().map(count_files).sum::<usize>()
+}
+
+/// Total (recursive) directories in a subtree.
+fn count_dirs(node: &DirTrie) -> usize {
+    node.dirs.len() + node.dirs.values().map(count_dirs).sum::<usize>()
+}
+
+/// Emit one tightly-scoped per-file page at an already-computed path.
+fn emit_leaf(
+    site: &mut AgentSite,
+    entry: &FileEntry,
+    rel: String,
+    breadcrumbs: Vec<NavLink>,
+    opts: &AgentOptions,
+) {
     let mut detail_blocks = Vec::new();
     if !entry.responsibilities.is_empty() {
         detail_blocks.push(DetailBlock {
@@ -1026,17 +1241,8 @@ fn emit_file(site: &mut AgentSite, frame: &Frame, entry: &FileEntry, opts: &Agen
         });
     }
 
-    let mut breadcrumbs = vec![NavLink { label: "Home".into(), target: ROOT_INDEX.into() }];
-    if !frame.rel_dir.is_empty() {
-        breadcrumbs.push(NavLink {
-            label: frame.name.clone(),
-            target: format!("{}/index.md", frame.rel_dir),
-        });
-    }
-    breadcrumbs.push(NavLink { label: entry.name.clone(), target: rel.clone() });
-
     site.pages.push(AgentPage {
-        rel_path: rel.clone(),
+        rel_path: rel,
         kind: PageKind::File,
         title: entry.name.clone(),
         summary: cap(&entry.summary, opts.max_desc_chars),
@@ -1047,8 +1253,129 @@ fn emit_file(site: &mut AgentSite, frame: &Frame, entry: &FileEntry, opts: &Agen
         detail_blocks,
         notes: Vec::new(),
     });
+}
 
-    rel
+/// Emit workflow diagrams nested by domain under `topics/diagrams/workflows/`
+/// and return the domain hub links for the Workflow topic page.
+fn emit_workflows(
+    site: &mut AgentSite,
+    bundle: &ResearchBundle,
+    opts: &AgentOptions,
+) -> Vec<NavLink> {
+    if !opts.diagrams {
+        return Vec::new();
+    }
+    let Some(dm) = &bundle.domain_modules else {
+        return Vec::new();
+    };
+    if dm.business_flows.is_empty() {
+        return Vec::new();
+    }
+
+    // Known domain names, keyed by slug, for canonical bucketing.
+    let known: Vec<(String, String)> = dm
+        .domain_modules
+        .iter()
+        .map(|d| (slugify(&d.name), d.name.clone()))
+        .collect();
+
+    // Bucket flows by the domain of their first non-empty step.
+    let mut buckets: std::collections::BTreeMap<String, (String, Vec<&BusinessFlow>)> =
+        std::collections::BTreeMap::new();
+    for flow in &dm.business_flows {
+        let domain = flow
+            .steps
+            .iter()
+            .map(|s| s.domain_module.trim())
+            .find(|s| !s.is_empty());
+        let (bucket, display) = match domain {
+            Some(d) => {
+                let ds = slugify(d);
+                match known.iter().find(|(slug, _)| *slug == ds) {
+                    Some((slug, name)) => (slug.clone(), name.clone()),
+                    None => ("general".to_string(), "General".to_string()),
+                }
+            }
+            None => ("general".to_string(), "General".to_string()),
+        };
+        buckets
+            .entry(bucket)
+            .or_insert_with(|| (display, Vec::new()))
+            .1
+            .push(flow);
+    }
+
+    let workflows_root = "topics/diagrams/workflows";
+    let root_hub_rel = format!("{}/index.md", workflows_root);
+    let mut bucket_links = Vec::new();
+
+    for (bucket, (display, flows)) in &buckets {
+        let bucket_rel = format!("{}/{}", workflows_root, bucket);
+        let bucket_hub = format!("{}/index.md", bucket_rel);
+
+        let mut reg = NameRegistry::new();
+        reg.reserve("index.md");
+        let mut sorted: Vec<&BusinessFlow> = flows.clone();
+        sorted.sort_by_key(|f| f.name.to_lowercase());
+
+        let mut flow_links = Vec::new();
+        for flow in sorted {
+            let Some((_, body)) =
+                diagrams::workflow_diagrams(std::slice::from_ref(flow)).into_iter().next()
+            else {
+                continue;
+            };
+            let fslug = reg.allocate(&slugify(&flow.name));
+            let rel = format!("{}/{}.md", bucket_rel, fslug);
+            site.diagrams.push(DiagramFile {
+                rel_path: rel.clone(),
+                title: format!("Workflow — {}", flow.name),
+                caption: cap(&flow.description, opts.max_desc_chars),
+                body,
+                owner: NavLink { label: "Workflow".into(), target: "topics/workflow.md".into() },
+            });
+            flow_links.push(NavLink { label: flow.name.clone(), target: rel });
+        }
+
+        site.pages.push(AgentPage {
+            rel_path: bucket_hub.clone(),
+            kind: PageKind::Dir,
+            title: display.clone(),
+            summary: format!("{} workflow(s).", flow_links.len()),
+            breadcrumbs: vec![
+                NavLink { label: "Home".into(), target: ROOT_INDEX.into() },
+                NavLink { label: "Workflow".into(), target: "topics/workflow.md".into() },
+                NavLink { label: "Workflows".into(), target: root_hub_rel.clone() },
+                NavLink { label: display.clone(), target: bucket_hub.clone() },
+            ],
+            nav_groups: vec![NavGroup { heading: "Workflows".into(), links: flow_links }],
+            source_paths: Vec::new(),
+            diagram_links: Vec::new(),
+            detail_blocks: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        bucket_links.push(NavLink { label: display.clone(), target: bucket_hub });
+    }
+
+    site.pages.push(AgentPage {
+        rel_path: root_hub_rel.clone(),
+        kind: PageKind::Dir,
+        title: "Workflows".into(),
+        summary: format!("{} domain(s).", bucket_links.len()),
+        breadcrumbs: vec![
+            NavLink { label: "Home".into(), target: ROOT_INDEX.into() },
+            NavLink { label: "Workflow".into(), target: "topics/workflow.md".into() },
+            NavLink { label: "Workflows".into(), target: root_hub_rel },
+        ],
+        nav_groups: vec![NavGroup { heading: "Domains".into(), links: bucket_links.clone() }],
+        source_paths: Vec::new(),
+        diagram_links: Vec::new(),
+        detail_blocks: Vec::new(),
+        notes: Vec::new(),
+    });
+
+    bucket_links
 }
 
 /// Cap prose length at a word boundary, appending an ellipsis when truncated.
@@ -1150,11 +1477,107 @@ mod tests {
         };
         let site = build_site(&bundle, &AgentOptions::default());
         let paths: Vec<&str> = site.pages.iter().map(|p| p.rel_path.as_str()).collect();
-        // Module lands under the deepest matching area (core/cache).
-        assert!(paths.contains(&"tree/core/cache/modules/cache.md"), "paths: {:?}", paths);
+        // Module is now a self-contained folder.
+        assert!(paths.contains(&"tree/core/cache/modules/cache/index.md"), "paths: {:?}", paths);
+        // File page mirrors the source tree (root stripped: core/cache/Cache.rs).
+        assert!(paths.contains(&"tree/core/cache/files/Cache.rs.md"), "paths: {:?}", paths);
+        assert!(paths.contains(&"tree/core/cache/files/index.md"), "paths: {:?}", paths);
         // File page is emitted and grounded in its source path.
         let file_page = site.pages.iter().find(|p| p.kind == PageKind::File).unwrap();
         assert_eq!(file_page.source_paths, vec!["core/cache/Cache.rs".to_string()]);
+    }
+
+    #[test]
+    fn file_pages_mirror_source_subdirectories() {
+        let bundle = ResearchBundle {
+            project_name: "proj".into(),
+            area_tree: Some(tree_two_levels()),
+            file_insights: vec![FileInsight {
+                name: "Store.rs".into(),
+                file_path: PathBuf::from("core/cache/registry/Store.rs"),
+                summary: "registry store".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let site = build_site(&bundle, &AgentOptions::default());
+        let paths: Vec<&str> = site.pages.iter().map(|p| p.rel_path.as_str()).collect();
+        // Mirror relative to the deepest matched root (core/cache).
+        assert!(paths.contains(&"tree/core/cache/files/registry/Store.rs.md"), "paths: {:?}", paths);
+        assert!(paths.contains(&"tree/core/cache/files/registry/index.md"), "paths: {:?}", paths);
+    }
+
+    #[test]
+    fn root_files_get_hub_and_index_link() {
+        let bundle = ResearchBundle {
+            project_name: "proj".into(),
+            area_tree: Some(tree_two_levels()),
+            file_insights: vec![FileInsight {
+                name: "main.rs".into(),
+                file_path: PathBuf::from("main.rs"),
+                summary: "entry".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let site = build_site(&bundle, &AgentOptions::default());
+        let paths: Vec<&str> = site.pages.iter().map(|p| p.rel_path.as_str()).collect();
+        assert!(paths.contains(&"files/main.rs.md"), "paths: {:?}", paths);
+        assert!(paths.contains(&"files/index.md"), "paths: {:?}", paths);
+        // Root index links the root file so it is not orphaned.
+        let index = site.pages.iter().find(|p| p.rel_path == ROOT_INDEX).unwrap();
+        let files_group = index.nav_groups.iter().find(|g| g.heading == "Files").unwrap();
+        assert!(files_group.links.iter().any(|l| l.target == "files/main.rs.md"));
+    }
+
+    #[test]
+    fn workflow_diagrams_group_by_domain() {
+        use crate::generator::research::types::{
+            BusinessFlow, BusinessFlowStep, DomainModule,
+        };
+        let bundle = ResearchBundle {
+            project_name: "proj".into(),
+            domain_modules: Some(DomainModulesReport {
+                domain_modules: vec![DomainModule {
+                    name: "Identity, Auth & Access".into(),
+                    ..Default::default()
+                }],
+                business_flows: vec![
+                    BusinessFlow {
+                        name: "Login Flow".into(),
+                        description: "sign in".into(),
+                        steps: vec![BusinessFlowStep {
+                            step: 1,
+                            domain_module: "Identity, Auth & Access".into(),
+                            operation: "auth".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    BusinessFlow {
+                        name: "Orphan Flow".into(),
+                        description: "unmatched".into(),
+                        steps: vec![BusinessFlowStep {
+                            step: 1,
+                            domain_module: "Nonexistent Domain".into(),
+                            operation: "do".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let site = build_site(&bundle, &AgentOptions::default());
+        let paths: Vec<&str> = site.pages.iter().map(|p| p.rel_path.as_str()).collect();
+        let dpaths: Vec<&str> = site.diagrams.iter().map(|d| d.rel_path.as_str()).collect();
+        assert!(dpaths.contains(&"topics/diagrams/workflows/identity-auth-access/login-flow.md"), "diagrams: {:?}", dpaths);
+        // Unmatched domain falls back to general/.
+        assert!(dpaths.contains(&"topics/diagrams/workflows/general/orphan-flow.md"), "diagrams: {:?}", dpaths);
+        assert!(paths.contains(&"topics/diagrams/workflows/index.md"), "paths: {:?}", paths);
+        assert!(paths.contains(&"topics/diagrams/workflows/identity-auth-access/index.md"), "paths: {:?}", paths);
     }
 
     #[test]
