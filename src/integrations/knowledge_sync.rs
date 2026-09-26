@@ -268,12 +268,21 @@ impl KnowledgeSyncer {
         }
 
         let target_lang = self.config.target_language.display_name();
+        // No timestamp in the header: the header is embedded in agent prompts,
+        // and a `last_synced` time would change the prompt (and its cache key)
+        // after every resync, forcing cache misses for every knowledge-bearing
+        // agent. Emit it as a log line instead.
+        println!(
+            "📚 Knowledge category '{}': {} doc(s), last processed {}",
+            category,
+            filtered_docs.len(),
+            metadata.last_synced.format("%Y-%m-%d %H:%M:%S UTC")
+        );
         let header = format!(
-            "# {} Documentation ({})\n\nCategory: {}\nLast processed: {}\nDocuments in category: {}\n\n",
+            "# {} Documentation ({})\n\nCategory: {}\nDocuments in category: {}\n\n",
             Self::format_category_name(category),
             target_lang,
             category,
-            metadata.last_synced.format("%Y-%m-%d %H:%M:%S UTC"),
             filtered_docs.len()
         );
 

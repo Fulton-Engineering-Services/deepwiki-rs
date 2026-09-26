@@ -104,13 +104,19 @@ impl Memory {
     }
 
     /// List all keys in the specified scope
+    /// Returns keys in sorted order: callers build prompts and evidence lists
+    /// from this, and HashMap iteration order is randomized per process. An
+    /// unsorted return makes prompt-derived cache keys differ across runs.
     pub fn list_keys(&self, scope: &str) -> Vec<String> {
         let prefix = format!("{}:", scope);
-        self.data
+        let mut keys: Vec<String> = self
+            .data
             .keys()
             .filter(|key| key.starts_with(&prefix))
             .map(|key| key[prefix.len()..].to_string())
-            .collect()
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// Check if specified data exists
@@ -206,6 +212,18 @@ mod tests {
                 .get::<Value>("preprocess", "code_insights")
                 .unwrap(),
             serde_json::json!({"x": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn list_keys_returns_sorted() {
+        let mut m = Memory::new();
+        m.store("s", "zeta", serde_json::json!(1)).unwrap();
+        m.store("s", "alpha", serde_json::json!(1)).unwrap();
+        m.store("other", "beta", serde_json::json!(1)).unwrap();
+        assert_eq!(
+            m.list_keys("s"),
+            vec!["alpha".to_string(), "zeta".to_string()]
         );
     }
 

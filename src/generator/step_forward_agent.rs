@@ -365,13 +365,20 @@ impl DataFormatter {
     }
 
     /// Format research results
+    /// Iterates keys in sorted order so the rendered prompt is byte-stable
+    /// across runs. HashMap iteration order is randomized per process; without
+    /// sorting, any agent consuming two or more research results builds a
+    /// different prompt every run and never hits the cache.
     pub fn format_research_results(&self, results: &HashMap<String, serde_json::Value>) -> String {
+        let mut sorted_keys: Vec<&String> = results.keys().collect();
+        sorted_keys.sort_unstable();
+
         let mut content = String::from("### Existing Research Results\n");
-        for (key, value) in results {
+        for key in sorted_keys {
             content.push_str(&format!(
                 "#### {}：\n{}\n\n",
                 key,
-                serde_json::to_string_pretty(value).unwrap_or_default()
+                serde_json::to_string_pretty(&results[key]).unwrap_or_default()
             ));
         }
         content
@@ -722,5 +729,34 @@ pub trait StepForwardAgent: Send + Sync {
         } else {
             Err(anyhow::format_err!(""))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn format_research_results_is_order_stable() {
+        let formatter = DataFormatter::new(FormatterConfig::default());
+
+        let mut a = HashMap::new();
+        a.insert("zeta".to_string(), json!({"v": 1}));
+        a.insert("alpha".to_string(), json!({"v": 2}));
+
+        let mut b = HashMap::new();
+        b.insert("alpha".to_string(), json!({"v": 2}));
+        b.insert("zeta".to_string(), json!({"v": 1}));
+
+        let out_a = formatter.format_research_results(&a);
+        let out_b = formatter.format_research_results(&b);
+
+        // Insertion order must not affect the rendered prompt: identical key
+        // sets produce identical byte output, so cache keys stay stable.
+        assert_eq!(out_a, out_b);
+        let alpha_pos = out_a.find("alpha").unwrap();
+        let zeta_pos = out_a.find("zeta").unwrap();
+        assert!(alpha_pos < zeta_pos);
     }
 }
