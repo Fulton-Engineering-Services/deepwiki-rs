@@ -68,6 +68,7 @@ OPTIONS:
         --llm-api-key <KEY>               LLM API key
         --skip-preprocessing              Skip initial code scanning phase
         --skip-research                   Skip AI research phase
+        --only-agent-content              Rebuild only .agent-content/ from the .litho/memory.json snapshot (no LLM calls; needs a prior full run)
         --disable-preset-tools            Disable automatic tool scanning
         --max-tokens <NUMBER>             Maximum tokens per request
         --temperature <NUMBER>            Model temperature [0.0-2.0]

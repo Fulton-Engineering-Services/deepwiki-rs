@@ -61,6 +61,7 @@ project-docs/
 - `--model-powerful`: Capable model for deep analysis
 - `--skip-preprocessing`: Skip initial scanning phase
 - `--skip-research`: Skip AI research phase
+- `--only-agent-content`: Rebuild only `.agent-content/` from the `.litho/memory.json` snapshot (no LLM calls; needs a prior full run)
 
 ## Advanced Resources
 

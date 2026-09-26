@@ -43,6 +43,13 @@ pub struct Args {
     #[arg(long)]
     pub skip_documentation: bool,
 
+    /// Rebuild only the agent content set from the persisted memory snapshot
+    /// (<project>/.litho/memory.json), skipping preprocessing, research, and
+    /// documentation. Makes no LLM calls; requires a snapshot from a prior
+    /// full run (incompatible with --force-regenerate / --no-agent-content)
+    #[arg(long, conflicts_with_all = ["force_regenerate", "no_agent_content"])]
+    pub only_agent_content: bool,
+
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,
@@ -325,8 +332,38 @@ impl Args {
         config.skip_research = self.skip_research;
         config.skip_documentation = self.skip_documentation;
         config.force_regenerate = self.force_regenerate;
+        config.only_agent_content = self.only_agent_content;
         config.verbose = self.verbose;
 
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn only_agent_content_alone_parses() {
+        assert!(Args::try_parse_from(["litho", "--only-agent-content"]).is_ok());
+    }
+
+    #[test]
+    fn only_agent_content_conflicts_with_force_regenerate() {
+        let res = Args::try_parse_from(["litho", "--only-agent-content", "--force-regenerate"]);
+        assert!(
+            res.is_err(),
+            "--force-regenerate must be rejected at parse time"
+        );
+    }
+
+    #[test]
+    fn only_agent_content_conflicts_with_no_agent_content() {
+        let res = Args::try_parse_from(["litho", "--only-agent-content", "--no-agent-content"]);
+        assert!(
+            res.is_err(),
+            "--no-agent-content must be rejected at parse time"
+        );
     }
 }

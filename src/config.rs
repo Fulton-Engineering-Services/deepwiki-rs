@@ -157,6 +157,13 @@ pub struct Config {
     #[serde(default)]
     pub force_regenerate: bool,
 
+    /// Skip every pipeline stage and rebuild only the agent content set from
+    /// the persisted memory snapshot (CLI --only-agent-content). Requires a
+    /// snapshot written by a prior full run; makes no LLM calls. Incompatible
+    /// with `force_regenerate` and `agent_content = false`. Default: false.
+    #[serde(default)]
+    pub only_agent_content: bool,
+
     /// Enable verbose logging for ReAct agents (CLI --verbose)
     #[serde(default)]
     pub verbose: bool,
@@ -842,6 +849,7 @@ impl Default for Config {
             skip_research: false,
             skip_documentation: false,
             force_regenerate: false,
+            only_agent_content: false,
             verbose: false,
             cost_and_usage: false,
             agent_content: true,
@@ -945,6 +953,18 @@ pricing_table = { "m" = { input_per_1k = 0.1, output_per_1k = 0.2 } }
         assert_eq!(c.pricing_table["m"].input_per_1k, 0.1);
         assert_eq!(c.pricing_table["m"].output_per_1k, 0.2);
         assert_eq!(c.cost_usage_dir, PathBuf::from(".litho/cost_usage"));
+    }
+
+    #[test]
+    fn only_agent_content_defaults_false_and_parses() {
+        assert!(!Config::default().only_agent_content);
+
+        let plain: Config = toml::from_str("project_name = \"t\"").unwrap();
+        assert!(!plain.only_agent_content);
+
+        let set: Config =
+            toml::from_str("project_name = \"t\"\nonly_agent_content = true").unwrap();
+        assert!(set.only_agent_content);
     }
 
     #[test]
