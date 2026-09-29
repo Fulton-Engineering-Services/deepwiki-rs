@@ -47,18 +47,21 @@ impl EchoKind {
     }
 }
 
-/// Keep at most `max` characters of `s`, showing its tail (the newest text).
-fn tail_slice(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
+/// Wrap `line` into chunks of at most `budget` chars, so a long streamed line
+/// occupies multiple terminal lines. Multibyte-safe: splits on char boundaries.
+fn wrap_line(line: &str, budget: usize) -> Vec<String> {
+    if budget == 0 || line.is_empty() {
+        return vec![line.to_string()];
     }
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
+    let mut chunks = Vec::new();
+    let mut rem = line;
+    while !rem.is_empty() {
+        let mut it = rem.chars();
+        let chunk: String = it.by_ref().take(budget).collect();
+        chunks.push(chunk);
+        rem = it.as_str();
     }
-    let mut out: String = s.chars().skip(count - max + 1).collect();
-    out.insert(0, '…');
-    out
+    chunks
 }
 
 /// Rolling tail window of the most recent streamed lines.
@@ -129,13 +132,16 @@ impl RollingTail {
         }
     }
 
-    /// Render the window as a newline-joined block, one line per entry.
+    /// Render the window as a newline-joined block. A long entry whose physical
+    /// line exceeds `width` is wrapped across multiple terminal lines.
     fn render(&self, width: usize) -> String {
         let mut out = Vec::with_capacity(self.lines.len() + 1);
         for (kind, line) in self.lines.iter().chain(self.current.iter()) {
             let prefix = kind.prefix();
             let budget = width.saturating_sub(prefix.chars().count()).max(1);
-            out.push(format!("{prefix}{}", tail_slice(line, budget)));
+            for chunk in wrap_line(line, budget) {
+                out.push(format!("{prefix}{chunk}"));
+            }
         }
         out.join("\n")
     }
@@ -638,10 +644,10 @@ mod tests {
     }
 
     #[test]
-    fn rolling_tail_tail_slices_long_lines() {
+    fn rolling_tail_wraps_long_lines() {
         let mut tail = RollingTail::new(1);
         tail.push(EchoKind::Output, "abcdefghij");
-        assert_eq!(tail.render(13), "out  │ …fghij");
+        assert_eq!(tail.render(13), "out  │ abcdef\nout  │ ghij");
     }
 
     fn text_item(text: &str) -> MultiTurnStreamItem<()> {
