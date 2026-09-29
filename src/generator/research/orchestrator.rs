@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow};
 use crate::generator::agent_executor::{AgentExecuteParams, extract};
 use crate::generator::compose::memory::MemoryScope as ComposeMemoryScope;
 use crate::generator::context::GeneratorContext;
+use crate::llm::client::run_status;
 use crate::generator::preprocess::memory::{MemoryScope as PreprocessMemoryScope, ScopedKeys};
 use crate::generator::research::agents::architecture_researcher::ArchitectureResearcher;
 use crate::generator::research::agents::area_mapper::AreaMapperAgent;
@@ -125,6 +126,7 @@ impl ResearchOrchestrator {
             "🍃 Found {} leaf areas to analyze in parallel",
             leaves.len()
         );
+        run_status::global().add_total(leaves.len() * 2);
 
         // Stage C: per-leaf scoped pipeline.
         let max_parallels = context.config.llm.max_parallels;

@@ -14,7 +14,7 @@ use crate::{
         context::GeneratorContext, preprocess::PreProcessAgent,
         research::orchestrator::ResearchOrchestrator, types::Generator,
     },
-    llm::client::LLMClient,
+    llm::client::{run_status, LLMClient},
     memory::{MEMORY_SNAPSHOT_FILE, MEMORY_SNAPSHOT_VERSION, Memory, MemorySnapshot},
 };
 use anyhow::{Context, Result, bail};
@@ -113,6 +113,7 @@ pub async fn launch(c: &Config) -> Result<()> {
             context.config.llm.provider.to_string(),
         );
         println!("💰 Cost & usage tracking enabled");
+        run_status::global().mark_has_real_data();
         if context.config.llm.provider != crate::config::LLMProvider::OpenAI {
             eprintln!(
                 "⚠️  Warning: cost/usage capture is wired to the OpenAI-compatible (LiteLLM) transport; provider '{}' calls will not be captured",
@@ -141,6 +142,9 @@ pub async fn launch(c: &Config) -> Result<()> {
         }
 
         // Preprocessing stage
+        run_status::global().set_stage("Preprocess");
+        run_status::global().add_total(2);
+        run_status::global().commit_total();
         if context.config.skip_preprocessing {
             println!("=== Skipping preprocessing (--skip-preprocessing) ===");
             println!("   ⚠️  Downstream stages read preprocessed insights from memory; if this is not a warm/partial run they may fail.");
@@ -159,6 +163,9 @@ pub async fn launch(c: &Config) -> Result<()> {
         }
 
         // Execute multi-agent research stage
+        run_status::global().set_stage("Research");
+        run_status::global().add_total(4);
+        run_status::global().commit_total();
         if context.config.skip_research {
             println!("=== Skipping research stage (--skip-research) ===");
         } else {
@@ -176,6 +183,9 @@ pub async fn launch(c: &Config) -> Result<()> {
         }
 
         // Execute document generation process
+        run_status::global().set_stage("Compose");
+        run_status::global().add_total(4);
+        run_status::global().commit_total();
         if context.config.skip_documentation {
             println!("=== Skipping document generation (--skip-documentation) ===");
         } else {
@@ -192,6 +202,8 @@ pub async fn launch(c: &Config) -> Result<()> {
             println!("\n=== Document generation completed (Duration: {:.2}s) ===", compose_time);
 
             // Execute document storage
+            run_status::global().set_stage("Outlet");
+            run_status::global().commit_total();
             let output_start = Instant::now();
             let outlet = DiskOutlet::new(doc_tree);
             outlet.save(&context).await?;
@@ -232,6 +244,7 @@ pub async fn launch(c: &Config) -> Result<()> {
         .await?;
 
     emit_cost_usage_report(&context).await;
+    run_status::global().finish();
 
     pipeline_result?;
 

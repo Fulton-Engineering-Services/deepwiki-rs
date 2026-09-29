@@ -10,6 +10,7 @@ use crate::generator::{
         AgentDataConfig, DataSource, FormatterConfig, LLMCallMode, PromptTemplate, StepForwardAgent,
     },
 };
+use crate::llm::client::run_status;
 use crate::types::{CodeAndDirectoryInsights, FileInsight};
 use crate::utils::threads::do_parallel_with_limit;
 use anyhow::{Result, anyhow};
@@ -102,6 +103,7 @@ impl KeyModulesInsight {
             domain_modules.len(),
             domain_names.join(", ")
         );
+        run_status::global().add_total(domain_modules.len());
 
         // 2. Perform concurrent analysis for each domain module
         println!("🚀 Starting concurrent analysis, max parallelism: {}", max_parallels);

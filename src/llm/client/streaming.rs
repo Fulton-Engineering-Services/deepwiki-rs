@@ -16,9 +16,11 @@ use std::future::Future;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use super::run_status;
+
 /// Shared `MultiProgress` manager so concurrent provider calls each get their
 /// own stderr line without overwriting one another.
-static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
+pub(crate) static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
 
 /// Rough character-to-token ratio used for live tok/s estimates.
 const CHARS_PER_TOKEN: usize = 4;
@@ -182,7 +184,7 @@ impl StreamProgress {
         // The echo pane is added first so `MultiProgress` draws it above the
         // spinner line.
         let echo = echo.then(|| {
-            let bar = MULTI_PROGRESS.add(ProgressBar::new_spinner());
+            let bar = MULTI_PROGRESS.insert_before(&run_status::global_bar(), ProgressBar::new_spinner());
             bar.set_style(
                 ProgressStyle::default_spinner()
                     .template("{wide_msg}")
@@ -193,7 +195,7 @@ impl StreamProgress {
                 tail: RollingTail::new(ECHO_WINDOW_LINES),
             }
         });
-        let bar = MULTI_PROGRESS.add(ProgressBar::new_spinner());
+        let bar = MULTI_PROGRESS.insert_before(&run_status::global_bar(), ProgressBar::new_spinner());
         bar.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg} · {pos} tok · {per_sec} · {elapsed_precise}")
@@ -335,6 +337,7 @@ pub async fn drain_to_string<R>(
                 tool_call,
                 ..
             })) => {
+                run_status::global().inc_tool_calls(1);
                 if let Some(p) = progress.as_mut() {
                     p.set_status(&format!("tool: {}", tool_call.function.name));
                     p.mark_tool(&format!("» tool: {}", tool_call.function.name));

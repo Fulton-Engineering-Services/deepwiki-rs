@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::generator::agent_executor::{AgentExecuteParams, extract, prompt, prompt_with_tools};
 use crate::generator::preprocess::memory::{MemoryScope, ScopedKeys};
 use crate::generator::research::memory::MemoryRetriever;
+use crate::llm::client::run_status;
 use crate::{
     generator::context::GeneratorContext,
     types::{
@@ -344,6 +345,7 @@ impl DataFormatter {
 
         println!("   🚨 Emergency truncation for [{}]: reduced from {} to {} characters",
                 content_type, content.len(), result.len());
+        run_status::global().inc_truncation();
 
         Ok(result)
     }

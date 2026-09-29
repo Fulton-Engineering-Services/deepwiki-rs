@@ -4,6 +4,7 @@ use tokio::time::Instant;
 
 use crate::generator::preprocess::extractors::original_document_extractor;
 use crate::generator::preprocess::memory::{MemoryScope, ScopedKeys};
+use crate::llm::client::run_status;
 use crate::types::original_document::OriginalDocument;
 use crate::{
     generator::{
@@ -187,6 +188,7 @@ async fn generate_directory_dossiers(
     }
 
     // Phase 2 (parallel, bounded by llm.max_parallels): summarize directories.
+    run_status::global().add_total(work_items.len());
     println!(
         "🚀 Generating directory dossiers concurrently, max parallelism: {}",
         max_parallels

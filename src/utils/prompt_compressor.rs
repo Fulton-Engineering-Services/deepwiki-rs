@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::generator::agent_executor::{AgentExecuteParams, prompt};
 use crate::generator::context::GeneratorContext;
+use crate::llm::client::run_status;
 use crate::utils::token_estimator::{TokenEstimation, TokenEstimator};
 
 /// Prompt compressor for compressing overly long prompt content
@@ -216,6 +217,7 @@ impl PromptCompressor {
                 "   🚨 Content too large for compression ({} tokens > {} ceiling); applying hard truncate.",
                 original_estimation.estimated_tokens, ceiling
             );
+            run_status::global().inc_truncation();
             let truncated = Self::truncate_to_budget(content, ceiling);
             let truncated_estimation = self.token_estimator.estimate_tokens(&truncated);
             return Ok(CompressionResult {

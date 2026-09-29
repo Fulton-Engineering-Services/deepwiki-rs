@@ -14,6 +14,7 @@ mod openai_compatible_extractor;
 mod providers;
 mod react;
 mod react_executor;
+pub mod run_status;
 mod streaming;
 mod summary_reasoner;
 pub mod types;
@@ -64,6 +65,7 @@ impl LLMClient {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     retries += 1;
+                    run_status::global().inc_retry();
                     let err_str = err.to_string();
                     let is_rate_limit = err_str.contains("429")
                         || err_str.contains("503")

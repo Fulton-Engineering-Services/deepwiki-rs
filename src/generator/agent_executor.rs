@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::generator::context::GeneratorContext;
+use crate::llm::client::run_status;
 use crate::llm::client::utils::estimate_token_usage;
 
 pub struct AgentExecuteParams {
@@ -31,6 +32,7 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
     {
         let msg = context.config.target_language.msg_cache_hit().replace("{}", log_tag);
         println!("{}", msg);
+        run_status::global().item_resolved();
         let text = match cached_reply {
             serde_json::Value::String(s) => s,
             other => other.to_string(),
@@ -53,6 +55,8 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
         .await;
 
     let input_text = format!("{} {}", prompt_sys, prompt_user);
+    let input_chars = input_text.chars().count();
+    let output_chars = result.as_ref().map(|r| r.chars().count()).unwrap_or(0);
     let (success, err) = match &result {
         Ok(_) => (true, None),
         Err(e) => (false, Some(format!("{}", e))),
@@ -64,12 +68,13 @@ pub async fn prompt(context: &GeneratorContext, params: AgentExecuteParams) -> R
         Some(log_tag.clone()),
         started.elapsed().as_millis() as u64,
         context.config.llm.stream_enabled(),
-        input_text.chars().count(),
-        result.as_ref().map(|r| r.chars().count()).unwrap_or(0),
+        input_chars,
+        output_chars,
         success,
         err,
     );
     let reply = result.map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
+    run_status::global().call_completed(input_chars, output_chars);
 
     // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &reply);
@@ -105,8 +110,9 @@ pub async fn prompt_with_tools(
         .get::<serde_json::Value>(cache_scope, &prompt_key)
         .await?
     {
-        let msg = context.config.target_language.msg_cache_hit().replace("{}", log_tag);
+let msg = context.config.target_language.msg_cache_hit().replace("{}", log_tag);
         println!("{}", msg);
+        run_status::global().item_resolved();
         let text = match cached_reply {
             serde_json::Value::String(s) => s,
             other => other.to_string(),
@@ -129,10 +135,12 @@ pub async fn prompt_with_tools(
         .await;
 
     let input_text = format!("{} {}", prompt_sys, prompt_user);
+    let input_chars = input_text.chars().count();
     let output_text = result
         .as_ref()
         .map(|r| serde_json::to_string(r).unwrap_or_default())
         .unwrap_or_default();
+    let output_chars = output_text.chars().count();
     let (success, err) = match &result {
         Ok(_) => (true, None),
         Err(e) => (false, Some(format!("{}", e))),
@@ -144,12 +152,13 @@ pub async fn prompt_with_tools(
         Some(log_tag.clone()),
         started.elapsed().as_millis() as u64,
         context.config.llm.stream_enabled(),
-        input_text.chars().count(),
-        output_text.chars().count(),
+        input_chars,
+        output_chars,
         success,
         err,
     );
     let reply = result.map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
+    run_status::global().call_completed(input_chars, output_chars);
 
     // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &output_text);
@@ -185,6 +194,7 @@ where
     {
         let msg = context.config.target_language.msg_cache_hit().replace("{}", log_tag);
         println!("{}", msg);
+        run_status::global().item_resolved();
         return Ok(cached_reply);
     }
 
@@ -203,10 +213,12 @@ where
         .await;
 
     let input_text = format!("{} {}", prompt_sys, prompt_user);
+    let input_chars = input_text.chars().count();
     let output_text = result
         .as_ref()
         .map(|r| serde_json::to_string(r).unwrap_or_default())
         .unwrap_or_default();
+    let output_chars = output_text.chars().count();
     let (success, err) = match &result {
         Ok(_) => (true, None),
         Err(e) => (false, Some(format!("{}", e))),
@@ -218,12 +230,13 @@ where
         Some(log_tag.clone()),
         started.elapsed().as_millis() as u64,
         context.config.llm.stream_enabled(),
-        input_text.chars().count(),
-        output_text.chars().count(),
+        input_chars,
+        output_chars,
         success,
         err,
     );
     let reply = result.map_err(|e| anyhow::anyhow!("AI analysis failed: {}", e))?;
+    run_status::global().call_completed(input_chars, output_chars);
 
     // Estimate token usage
     let token_usage = estimate_token_usage(&input_text, &output_text);

@@ -1,6 +1,7 @@
 use crate::generator::compose::memory::MemoryScope;
 use crate::generator::context::GeneratorContext;
 use crate::generator::outlet::DocTree;
+use crate::llm::client::run_status;
 use crate::generator::research::memory::MemoryRetriever;
 use crate::generator::research::types::{AgentType as ResearchAgentType, KeyModuleReport};
 use crate::generator::step_forward_agent::{
@@ -20,6 +21,7 @@ impl KeyModulesInsightEditor {
         {
             let insight_reports: Vec<KeyModuleReport> = serde_json::from_value(value)?;
             let max_parallels = context.config.llm.max_parallels;
+            run_status::global().add_total(insight_reports.len());
 
             println!(
                 "🚀 Starting concurrent analysis of insight reports, max concurrency: {}",

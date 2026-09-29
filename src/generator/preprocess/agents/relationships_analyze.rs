@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::generator::agent_executor::{AgentExecuteParams, extract};
 use crate::generator::preprocess::memory::ScopedKeys;
+use crate::llm::client::run_status;
 use crate::types::code_releationship::RelationshipAnalysis;
 use crate::{
     generator::context::GeneratorContext,
@@ -62,6 +63,7 @@ impl RelationshipsAnalyze {
                     directory_dossiers.len(),
                     index_token_budget,
                 );
+                run_status::global().inc_truncation();
             }
 
             let selection = self
@@ -252,6 +254,7 @@ Rules:
                     "   ✂️  Fallback selection index truncated to top {} directories",
                     included
                 );
+                run_status::global().inc_truncation();
                 let compressed_tokens = capped.len() / 4;
                 CompressionResult {
                     compressed_content: capped,

@@ -336,6 +336,26 @@ impl UsageTracker {
     }
 }
 
+/// Cheap live snapshot of aggregate totals — used by the global status bar.
+/// Returns `(input_tokens, output_tokens, cached_input_tokens, total_cost_usd, calls)`.
+pub fn snapshot_totals() -> Option<(u64, u64, u64, f64, usize)> {
+    let st = USAGE_TRACKER.inner.lock().unwrap();
+    if st.records.is_empty() {
+        return None;
+    }
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut cached = 0u64;
+    let mut cost = 0.0f64;
+    for r in &st.records {
+        input += r.input_tokens;
+        output += r.output_tokens;
+        cached += r.cached_input_tokens;
+        cost += r.cost_usd.unwrap_or(0.0);
+    }
+    Some((input, output, cached, cost, st.records.len()))
+}
+
 /// Render the markdown cost & usage report for one execution.
 pub fn render_markdown_report(report: &ExecutionUsageReport) -> String {
     let mut s = String::new();
