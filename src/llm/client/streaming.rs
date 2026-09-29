@@ -24,7 +24,7 @@ static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::ne
 const CHARS_PER_TOKEN: usize = 4;
 
 /// Number of physical lines kept in the rolling echo window.
-const ECHO_WINDOW_LINES: usize = 4;
+const ECHO_WINDOW_LINES: usize = 16;
 
 /// Fallback terminal width when stderr is not a TTY.
 const ECHO_FALLBACK_WIDTH: usize = 100;
