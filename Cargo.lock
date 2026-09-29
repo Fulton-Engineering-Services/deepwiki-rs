@@ -398,6 +398,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "console",
  "eventsource-stream",
  "futures",
  "glob",

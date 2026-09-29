@@ -24,6 +24,7 @@ pub struct OllamaExtractorWrapper<T> {
     base_url: String,
     model: String,
     stream: bool,
+    echo: bool,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -38,6 +39,7 @@ where
         base_url: String,
         model: String,
         stream: bool,
+        echo: bool,
     ) -> Self {
         Self {
             agent,
@@ -45,6 +47,7 @@ where
             base_url,
             model,
             stream,
+            echo,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -95,7 +98,7 @@ where
     async fn try_extract_via_rig(&self, prompt: &str, attempt: usize) -> Result<T> {
         let response = if self.stream {
             let stream_items = self.agent.stream_prompt(prompt).await;
-            drain_to_string(stream_items, Some(&self.model))
+            drain_to_string(stream_items, Some(&self.model), self.echo)
                 .await
                 .context("Failed to get response from Ollama via rig")?
         } else {

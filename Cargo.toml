@@ -68,3 +68,5 @@ glob = "0.3"
 
 # 进度条 / 实时状态（tok/s、spinner）
 indicatif = "0.17"
+# 终端宽度（rolling echo 窗口折行）；与 indicatif 同一依赖树，不增加编译成本
+console = "0.15"

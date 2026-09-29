@@ -268,6 +268,13 @@ pub struct LLMConfig {
     /// is ever parsed.
     #[serde(default)]
     pub stream: Option<bool>,
+
+    /// Echo the streamed thinking and output onto the live status output as a
+    /// rolling tail window (CLI --show-streaming-thinking-and-output). Purely a
+    /// terminal display concern: deltas are still accumulated and parsed the
+    /// same way regardless. Default: true.
+    #[serde(default = "default_true")]
+    pub show_streaming_thinking_and_output: bool,
 }
 
 /// Per-model pricing (USD per 1K tokens) used to estimate cost when the
@@ -879,6 +886,7 @@ impl Default for LLMConfig {
             max_turns: 100,
             tool_concurrency: 4,
             stream: None,
+            show_streaming_thinking_and_output: true,
         }
     }
 }
@@ -1006,5 +1014,16 @@ pricing_table = { "m" = { input_per_1k = 0.1, output_per_1k = 0.2 } }
             ..Default::default()
         };
         assert!(forced_on.stream_enabled());
+    }
+
+    #[test]
+    fn test_show_streaming_thinking_and_output_defaults_true() {
+        assert!(LLMConfig::default().show_streaming_thinking_and_output);
+
+        let off = LLMConfig {
+            show_streaming_thinking_and_output: false,
+            ..Default::default()
+        };
+        assert!(!off.show_streaming_thinking_and_output);
     }
 }

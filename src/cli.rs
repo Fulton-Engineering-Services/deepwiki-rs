@@ -102,6 +102,11 @@ pub struct Args {
     #[arg(long, default_value = "false", action = clap::ArgAction::SetTrue)]
     pub disable_preset_tools: bool,
 
+    /// Echo the streamed thinking and output on the live status output as a
+    /// rolling tail window (default: true; pass false to disable)
+    #[arg(long)]
+    pub show_streaming_thinking_and_output: Option<bool>,
+
     /// Disable cache
     #[arg(long)]
     pub no_cache: bool,
@@ -275,6 +280,9 @@ impl Args {
             config.llm.tool_concurrency = tool_concurrency;
         }
         config.llm.disable_preset_tools = self.disable_preset_tools;
+        if let Some(show_streaming) = self.show_streaming_thinking_and_output {
+            config.llm.show_streaming_thinking_and_output = show_streaming;
+        }
 
         // Target language configuration
         if let Some(target_language_str) = self.target_language {
@@ -365,5 +373,26 @@ mod tests {
             res.is_err(),
             "--no-agent-content must be rejected at parse time"
         );
+    }
+
+    #[test]
+    fn show_streaming_thinking_and_output_defaults_to_unset() {
+        let args = Args::try_parse_from(["litho"]).unwrap();
+        assert_eq!(args.show_streaming_thinking_and_output, None);
+    }
+
+    #[test]
+    fn show_streaming_thinking_and_output_accepts_false() {
+        let args =
+            Args::try_parse_from(["litho", "--show-streaming-thinking-and-output", "false"])
+                .unwrap();
+        assert_eq!(args.show_streaming_thinking_and_output, Some(false));
+    }
+
+    #[test]
+    fn show_streaming_thinking_and_output_accepts_true() {
+        let args =
+            Args::try_parse_from(["litho", "--show-streaming-thinking-and-output", "true"]).unwrap();
+        assert_eq!(args.show_streaming_thinking_and_output, Some(true));
     }
 }

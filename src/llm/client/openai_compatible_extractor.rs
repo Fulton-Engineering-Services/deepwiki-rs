@@ -26,6 +26,7 @@ pub struct OpenAICompatibleExtractorWrapper<T> {
     model: String,
     api_key: String,
     stream: bool,
+    echo: bool,
     max_tokens: u32,
     temperature: Option<f64>,
     _phantom: std::marker::PhantomData<T>,
@@ -46,6 +47,7 @@ where
         model: String,
         api_key: String,
         stream: bool,
+        echo: bool,
         max_tokens: u32,
         temperature: Option<f64>,
     ) -> Self {
@@ -56,6 +58,7 @@ where
             model,
             api_key,
             stream,
+            echo,
             max_tokens,
             temperature,
             _phantom: std::marker::PhantomData,
@@ -109,7 +112,7 @@ where
     async fn try_extract_via_rig(&self, prompt: &str, attempt: usize) -> Result<T> {
         let response = if self.stream {
             let stream_items = self.agent.stream_prompt(prompt).await;
-            drain_to_string(stream_items, Some(&self.model))
+            drain_to_string(stream_items, Some(&self.model), self.echo)
                 .await
                 .context("Failed to get response via rig")?
         } else {
@@ -182,6 +185,7 @@ where
                 &self.model,
                 format!("{}/chat/completions", self.base_url.trim_end_matches('/')),
                 self.model.clone(),
+                self.echo,
             )
             .await?
         } else {

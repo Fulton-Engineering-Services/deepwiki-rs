@@ -141,6 +141,7 @@ impl ProviderClient {
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 }
             }
             ProviderClient::Moonshot(client) => {
@@ -157,6 +158,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::DeepSeek(client) => {
@@ -173,6 +175,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Mistral(client) => {
@@ -189,6 +192,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::OpenRouter(client) => {
@@ -205,6 +209,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Anthropic(client) => {
@@ -222,6 +227,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Gemini(client) => {
@@ -244,6 +250,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Ollama(client) => {
@@ -261,6 +268,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
         }
@@ -303,6 +311,7 @@ impl ProviderClient {
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 }
             }
             ProviderClient::Moonshot(client) => {
@@ -325,6 +334,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::DeepSeek(client) => {
@@ -347,6 +357,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Mistral(client) => {
@@ -368,6 +379,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::OpenRouter(client) => {
@@ -389,6 +401,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Anthropic(client) => {
@@ -411,6 +424,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Gemini(client) => {
@@ -437,6 +451,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
             ProviderClient::Ollama(client) => {
@@ -459,6 +474,7 @@ impl ProviderClient {
                     agent,
                     model: model.to_string(),
                     stream: config.stream_enabled(),
+                    echo: config.show_streaming_thinking_and_output,
                 })
             }
         }
@@ -496,6 +512,7 @@ impl ProviderClient {
                     model.to_string(),
                     config.api_key.clone(),
                     config.stream_enabled(),
+                    config.show_streaming_thinking_and_output,
                     config.max_tokens,
                     config.temperature,
                 );
@@ -575,6 +592,7 @@ impl ProviderClient {
                     config.api_base_url.clone(),
                     model.to_string(),
                     config.stream_enabled(),
+                    config.show_streaming_thinking_and_output,
                 );
 
                 ProviderExtractor::Ollama(wrapper)
@@ -596,6 +614,7 @@ pub enum ProviderAgent {
         max_tokens: u32,
         temperature: Option<f64>,
         stream: bool,
+        echo: bool,
     },
     Mistral(AgentHandle<Agent<rig_core::providers::mistral::CompletionModel>>),
     OpenRouter(AgentHandle<Agent<rig_core::providers::openrouter::CompletionModel>>),
@@ -613,6 +632,7 @@ pub struct AgentHandle<A> {
     pub agent: A,
     pub model: String,
     pub stream: bool,
+    pub echo: bool,
 }
 
 impl ProviderAgent {
@@ -623,14 +643,24 @@ impl ProviderAgent {
         // cannot grow unbounded; the real drain happens at the funnel.
         let _ = take_captures_for_current_task();
         match self {
-            ProviderAgent::OpenAI { agent, base_url, model, api_key, system_prompt, max_tokens, temperature, stream } => {
+            ProviderAgent::OpenAI {
+                agent,
+                base_url,
+                model,
+                api_key,
+                system_prompt,
+                max_tokens,
+                temperature,
+                stream,
+                echo,
+            } => {
                 // Try rig agent first (streaming when enabled) with concurrency
                 let rig_result = if *stream {
                     let stream_items = agent
                         .stream_prompt(prompt)
                         .tool_concurrency(concurrency)
                         .await;
-                    drain_to_string(stream_items, Some(model)).await
+                    drain_to_string(stream_items, Some(model), *echo).await
                 } else {
                     with_spinner(model, "calling", async {
                         agent.prompt(prompt).tool_concurrency(concurrency).await
@@ -657,6 +687,7 @@ impl ProviderAgent {
                                 *temperature,
                                 prompt,
                                 *stream,
+                                *echo,
                             )
                             .await
                         } else {
@@ -666,25 +697,25 @@ impl ProviderAgent {
                 }
             }
             ProviderAgent::Moonshot(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
             ProviderAgent::DeepSeek(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
             ProviderAgent::Mistral(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
             ProviderAgent::OpenRouter(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
             ProviderAgent::Anthropic(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
             ProviderAgent::Gemini(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
             ProviderAgent::Ollama(handle) => {
-                Self::prompt_single(&handle.agent, &handle.model, handle.stream, prompt, concurrency).await
+                Self::prompt_single(&handle.agent, &handle.model, handle.stream, handle.echo, prompt, concurrency).await
             }
         }
     }
@@ -696,6 +727,7 @@ impl ProviderAgent {
         agent: &Agent<M>,
         model: &str,
         stream: bool,
+        echo: bool,
         prompt: &str,
         concurrency: usize,
     ) -> Result<String>
@@ -708,7 +740,7 @@ impl ProviderAgent {
                 .stream_prompt(prompt)
                 .tool_concurrency(concurrency)
                 .await;
-            drain_to_string(stream_items, Some(model)).await
+            drain_to_string(stream_items, Some(model), echo).await
         } else {
             with_spinner(model, "calling", async {
                 agent.prompt(prompt).tool_concurrency(concurrency).await
@@ -737,6 +769,7 @@ impl ProviderAgent {
         temperature: Option<f64>,
         prompt: &str,
         stream: bool,
+        echo: bool,
     ) -> Result<String> {
         // Streaming: bound per-read activity instead of a total request
         // timeout, which would otherwise kill long-running SSE responses.
@@ -800,6 +833,7 @@ impl ProviderAgent {
                 model,
                 format!("{}/chat/completions", base_url.trim_end_matches('/')),
                 model.to_string(),
+                echo,
             )
             .await;
         }
